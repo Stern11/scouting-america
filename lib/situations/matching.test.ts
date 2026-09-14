@@ -268,3 +268,50 @@ describe("assignRepresentation — one-to-one assignment", () => {
     expect(byId.get("hi_noprice")!.proposedDisposition).toBe("under_review");
   });
 });
+
+describe("assignRepresentation — the assignment is solved, not picked greedily", () => {
+  // H1 fits A exactly and B nearly; H2 fits only A. Taking the single best
+  // pair (H1 -> A) first strands H2, which would then surface as a gap that
+  // does not exist. Pairing H1 -> B and H2 -> A represents both.
+  const h1 = historical({ id: "h1", itemId: "p1", customer: "Walmart", channel: "Mass" });
+  const h2 = historical({ id: "h2", itemId: "p2", customer: "Target", channel: "Mass" });
+  const a = current({ id: "cA", itemId: "A", customer: "Walmart", channel: "Mass" });
+  const b = current({ id: "cB", itemId: "B", customer: "Walmart", channel: "Club" });
+
+  it("sets up the scores the greedy choice gets wrong", () => {
+    expect(compareToCurrentItem(h1, a).score).toBeCloseTo(1, 6);
+    expect(compareToCurrentItem(h1, b).score).toBeCloseTo(0.9, 6);
+    expect(compareToCurrentItem(h2, a).score).toBeCloseTo(0.8, 6);
+    expect(compareToCurrentItem(h2, b).score).toBeCloseTo(0.7, 6);
+  });
+
+  it("represents both prior items when a greedy pick would strand one", () => {
+    const assignments = assignRepresentation([h1, h2], [a, b]);
+    expect(assignments.get("h1")!.matchedItemId).toBe("B");
+    expect(assignments.get("h2")!.matchedItemId).toBe("A");
+  });
+
+  it("does not depend on the order rows arrive in", () => {
+    const assignments = assignRepresentation([h2, h1], [b, a]);
+    expect(assignments.get("h1")!.matchedItemId).toBe("B");
+    expect(assignments.get("h2")!.matchedItemId).toBe("A");
+  });
+
+  it("prefers the higher total score when both assignments represent everything", () => {
+    const clubRow = historical({ id: "h3", itemId: "p3", customer: "Walmart", channel: "Club" });
+    const assignments = assignRepresentation([h1, clubRow], [a, b]);
+    expect(assignments.get("h1")!.matchedItemId).toBe("A");
+    expect(assignments.get("h3")!.matchedItemId).toBe("B");
+  });
+
+  it("still lets a carried-over item id win outright", () => {
+    // H1 is literally item A carried into the new plan. H2 could only ever be
+    // represented by A, but an identical id is evidence, not inference.
+    const carried = historical({ id: "h1", itemId: "A", customer: "Walmart", channel: "Mass" });
+    const candidates = buildCandidates([carried, h2], [a], {});
+    const byId = new Map(candidates.map((c) => [c.id, c]));
+    expect(byId.get("h1")!.match.matchedItemId).toBe("A");
+    expect(byId.get("h2")!.match.matchedItemId).toBeUndefined();
+    expect(byId.get("h2")!.proposedDisposition).toBe("under_review");
+  });
+});

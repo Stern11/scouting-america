@@ -77,21 +77,92 @@ export function applyScenarioToDataset(
       })
     : dataset.lineCapacity;
 
+  const shares = hasMapping ? effectiveAllocations(dataset, adjustments.allocation) : new Map<string, number>();
   const itemLineMappings = hasMapping
     ? dataset.itemLineMappings.map((row) => {
         const key = mappingKey(row.itemOrFamilyId, row.lineId);
         const rate = adjustments.runRate[key];
-        const allocation = adjustments.allocation[key];
-        if (rate === undefined && allocation === undefined) return row;
+        const share = shares.get(allocationRowKey(row));
+        if (rate === undefined && share === undefined) return row;
         return {
           ...row,
           runRateUnitsPerHour: rate === undefined ? row.runRateUnitsPerHour : clamp(rate, LIMITS.runRate),
-          allocationPct: allocation === undefined ? row.allocationPct : clamp(allocation, LIMITS.allocation),
+          allocationPct: share === undefined ? row.allocationPct : share,
         };
       })
     : dataset.itemLineMappings;
 
   return { ...dataset, lineCapacity, itemLineMappings };
+}
+
+/* ------------------------------------------------------------------ */
+/* Line split                                                          */
+/* ------------------------------------------------------------------ */
+
+/** One mapping row, unique across mapping levels. */
+function allocationRowKey(row: { mappingLevel: string; itemOrFamilyId: string; lineId: string }): string {
+  return `${row.mappingLevel}::${row.itemOrFamilyId.toLowerCase()}::${row.lineId}`;
+}
+
+/**
+ * Rebalances a split so it sums to exactly 100%.
+ *
+ * A family cannot be sent 100% to one line and 100% to another — that was a
+ * real bug. The lines a planner has set are held and the untouched lines
+ * absorb the remainder in proportion to their baseline shares. If the held
+ * lines alone exceed 100% (or nothing is left to absorb), the held lines are
+ * scaled down together.
+ */
+export function normalizeShares(parts: readonly { baseline: number; override?: number }[]): number[] {
+  if (parts.length === 0) return [];
+  const held = parts.map((p) => (p.override === undefined ? undefined : clamp(p.override, LIMITS.allocation)));
+  const heldSum = held.reduce<number>((s, v) => s + (v ?? 0), 0);
+  const freeIdx = parts.map((_, i) => i).filter((i) => held[i] === undefined);
+
+  if (freeIdx.length === 0 || heldSum >= 1) {
+    if (heldSum <= 0) return parts.map(() => 1 / parts.length);
+    return held.map((v) => (v === undefined ? 0 : v / heldSum));
+  }
+
+  const remainder = 1 - heldSum;
+  const freeBaseline = freeIdx.reduce((s, i) => s + Math.max(0, parts[i]!.baseline), 0);
+  return parts.map((p, i) => {
+    const h = held[i];
+    if (h !== undefined) return h;
+    return freeBaseline > 0 ? (Math.max(0, p.baseline) / freeBaseline) * remainder : remainder / freeIdx.length;
+  });
+}
+
+/**
+ * Effective share for every mapping row in an item/family whose split the
+ * scenario touches, normalised so each item/family sums to 100%. Rows in an
+ * untouched item/family are absent — they pass through as the data says.
+ */
+export function effectiveAllocations(
+  dataset: PlanningDataset,
+  overrides: Record<string, number>
+): Map<string, number> {
+  const out = new Map<string, number>();
+  if (Object.keys(overrides).length === 0) return out;
+
+  const groups = new Map<string, PlanningDataset["itemLineMappings"]>();
+  for (const row of dataset.itemLineMappings) {
+    const group = `${row.mappingLevel}::${row.itemOrFamilyId.toLowerCase()}`;
+    const list = groups.get(group);
+    if (list) list.push(row);
+    else groups.set(group, [row]);
+  }
+
+  for (const rows of groups.values()) {
+    const parts = rows.map((row) => ({
+      baseline: row.allocationPct ?? 1 / rows.length,
+      override: overrides[mappingKey(row.itemOrFamilyId, row.lineId)],
+    }));
+    if (parts.every((p) => p.override === undefined)) continue;
+    const shares = normalizeShares(parts);
+    rows.forEach((row, i) => out.set(allocationRowKey(row), shares[i]!));
+  }
+  return out;
 }
 
 /**
@@ -194,13 +265,20 @@ export function diffAdjustments(
   adjustments: ScenarioAdjustments
 ): AdjustmentDiff[] {
   const diffs: AdjustmentDiff[] = [];
+  // A share is compared as it is actually applied: rebalanced to sum to 100%.
+  const shares = effectiveAllocations(dataset, adjustments.allocation ?? {});
 
   for (const spec of DIFF_SPECS) {
     const overrides = adjustments[spec.category] ?? {};
     for (const [key, scenario] of Object.entries(overrides)) {
       const resolved = spec.resolve(dataset, key);
       if (!resolved) continue;
-      const value = clamp(scenario, LIMITS[spec.category]);
+      const mappingRow =
+        spec.category === "allocation"
+          ? dataset.itemLineMappings.find((r) => mappingKey(r.itemOrFamilyId, r.lineId) === key)
+          : undefined;
+      const value =
+        (mappingRow ? shares.get(allocationRowKey(mappingRow)) : undefined) ?? clamp(scenario, LIMITS[spec.category]);
       if (Math.abs(value - resolved.baseline) < spec.epsilon) continue;
       diffs.push({
         category: spec.category,
@@ -227,4 +305,26 @@ export function countAdjustments(adjustments: ScenarioAdjustments): number {
     Object.keys(adjustments.volumeUnits ?? {}).length +
     Object.keys(adjustments.analogueWeights ?? {}).length
   );
+}
+
+/**
+ * True when two adjustment sets hold the same overrides — the test for a
+ * scenario draft differing from what was last saved. Works for any shape of
+ * `{ category: { key: number } }`, so demand and capacity scenarios share it.
+ * A missing category and an empty one are the same thing.
+ */
+export function sameAdjustments(a: object, b: object): boolean {
+  const left = a as Record<string, Record<string, number> | undefined>;
+  const right = b as Record<string, Record<string, number> | undefined>;
+  const categories = new Set([...Object.keys(left), ...Object.keys(right)]);
+  for (const category of categories) {
+    const l = left[category] ?? {};
+    const r = right[category] ?? {};
+    const keys = Object.keys(l);
+    if (keys.length !== Object.keys(r).length) return false;
+    for (const key of keys) {
+      if (!(key in r) || Math.abs((l[key] ?? 0) - (r[key] ?? 0)) > 1e-9) return false;
+    }
+  }
+  return true;
 }

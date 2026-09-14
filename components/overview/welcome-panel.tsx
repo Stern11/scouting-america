@@ -40,12 +40,12 @@ export function WelcomePanel({
   const firstName = user?.name.split(" ")[0];
 
   return (
-    <div className="relative mb-6 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--accent)] bg-[var(--accent-soft)] px-7 py-6">
+    <div className="relative mb-6 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--accent)] bg-[var(--accent-soft)] px-4 py-5 sm:px-7 sm:py-6">
       <button
         type="button"
         onClick={dismissWelcome}
         aria-label="Dismiss"
-        className="absolute right-3 top-3 grid size-7 place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] transition-colors hover:bg-[var(--interaction-hover)] hover:text-[var(--text-primary)]"
+        className="absolute right-2.5 top-2.5 grid size-8 place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] transition-colors hover:bg-[var(--interaction-hover)] hover:text-[var(--text-primary)]"
         style={{ transitionDuration: "var(--duration-fast)" }}
       >
         <X className="size-3.5" />
@@ -60,8 +60,9 @@ export function WelcomePanel({
         <span className="font-medium text-[var(--text-primary)]">
           which products sold last season and have nothing standing for them this year
         </span>
-        . There are {summary.unrepresentedSkuCount} of them, worth{" "}
-        {fmtMoney(summary.unresolvedValue, summary.currency)}. Decide what carries forward, and the
+        . There are {summary.unrepresentedSkuCount} of them
+        {summary.valuesComparable ? `, worth ${fmtMoney(summary.unresolvedValue, summary.currency)}` : ""}.
+        Decide what carries forward, and the
         line hours, component dates and material orders all follow from that one decision.
       </p>
 

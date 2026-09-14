@@ -19,7 +19,9 @@
 import { Drawer, DrawerContent } from "@/components/ui/drawer";
 import { MaterialStatusBadge } from "@/components/shared/state-badge";
 import { Label } from "@/components/shared/page";
+import { SupplierTable } from "@/components/workspace/supplier-table";
 import { materialDetail, type MaterialDetail } from "@/lib/situations/material-detail";
+import { supplierComparison, type SupplierComparison } from "@/lib/situations/suppliers";
 import { cn } from "@/lib/utils/cn";
 import { fmtDateShort, fmtNum, fmtPct, fmtWeeks } from "@/lib/utils/format";
 import type { PlanningDataset } from "@/types/dataset";
@@ -37,23 +39,25 @@ export function MaterialDrawer({
   onClose: () => void;
 }) {
   const detail = dataset && materialId ? materialDetail(dataset, situation, materialId) : undefined;
+  const comparison =
+    dataset && materialId ? supplierComparison(dataset, situation, materialId) : undefined;
 
   return (
     <Drawer open={detail !== undefined} onOpenChange={(open) => (open ? undefined : onClose())}>
-      {detail ? (
+      {detail && comparison ? (
         <DrawerContent
           title={detail.materialName}
           description={`${detail.componentType.replace(/_/g, " ").toLowerCase()} · ${situation.title}`}
           eyebrow={detail.hasInferredSource ? "Partly inferred" : undefined}
         >
-          <Body detail={detail} />
+          <Body detail={detail} comparison={comparison} />
         </DrawerContent>
       ) : null}
     </Drawer>
   );
 }
 
-function Body({ detail }: { detail: MaterialDetail }) {
+function Body({ detail, comparison }: { detail: MaterialDetail; comparison: SupplierComparison }) {
   return (
     <div className="flex flex-col gap-7">
       {/* The figure being committed leads; everything else is support. */}
@@ -129,47 +133,20 @@ function Body({ detail }: { detail: MaterialDetail }) {
       </section>
 
       {/* ---------------- suppliers ---------------- */}
-      {detail.suppliers.length > 0 ? (
-        <section>
-          <Heading aside={`${detail.suppliers.length} of record`}>Who supplies it</Heading>
-          <div className="flex flex-col">
-            {detail.suppliers.map((supplier, index) => (
-              <div
-                key={supplier.supplierId}
-                className="flex items-center gap-4 border-b border-[var(--border)] py-2.5 last:border-b-0"
-              >
-                <span className="w-4 flex-none text-[11px] tabular-nums text-[var(--text-muted)]">
-                  L{index + 1}
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-[13px] font-medium text-[var(--text-primary)]">
-                    {supplier.supplierName}
-                  </div>
-                  <div className="text-[11.5px] tabular-nums text-[var(--text-muted)]">
-                    {supplier.receipts} receipt{supplier.receipts === 1 ? "" : "s"} · median{" "}
-                    {Math.round(supplier.medianLeadTimeDays)}d · worst{" "}
-                    {Math.round(supplier.worstLeadTimeDays)}d
-                  </div>
-                </div>
-                <div className="w-[72px] flex-none sm:w-[124px]">
-                  <div className="h-[6px] rounded-full bg-[var(--chart-track)]">
-                    <div
-                      className="h-full rounded-full bg-[var(--state-historical)]"
-                      style={{ width: `${Math.max(2, supplier.quantityShare * 100)}%` }}
-                    />
-                  </div>
-                </div>
-                <span className="w-[42px] flex-none text-right text-[12px] font-medium tabular-nums text-[var(--text-secondary)]">
-                  {fmtPct(supplier.quantityShare)}
-                </span>
-              </div>
-            ))}
-          </div>
-          <p className="mt-2 text-[11.5px] text-[var(--text-muted)]">
-            Share is of quantity received in the sample, not of contracted volume.
-          </p>
-        </section>
-      ) : null}
+      {/* The same table the release dialog awards from, off the same
+          derivation — the drawer and the decision cannot disagree. */}
+      <section>
+        <Heading
+          aside={comparison.suppliers.length > 0 ? `${comparison.suppliers.length} of record` : undefined}
+        >
+          Who supplies it
+        </Heading>
+        {comparison.suppliers.length > 0 ? (
+          <SupplierTable comparison={comparison} layout="list" />
+        ) : (
+          <p className="text-[12.5px] text-[var(--text-muted)]">{comparison.unavailableReason}</p>
+        )}
+      </section>
 
       {/* ---------------- who needs it ---------------- */}
       <section>
@@ -309,7 +286,7 @@ function LeadTime({ detail }: { detail: MaterialDetail }) {
           <div key={row.label} className="flex items-center gap-2 sm:gap-3">
             <span
               className={cn(
-                "w-[96px] flex-none text-[11.5px] sm:w-[132px]",
+                "w-[118px] flex-none truncate whitespace-nowrap text-[11.5px] sm:w-[132px]",
                 row.active
                   ? "font-medium text-[var(--text-primary)]"
                   : "text-[var(--text-muted)]"
@@ -417,11 +394,13 @@ function Legend({
 
 function Heading({ children, aside }: { children: React.ReactNode; aside?: string }) {
   return (
-    <div className="mb-2 flex items-baseline justify-between gap-3">
-      <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">
+    // Each part stays on one line; when both do not fit, the aside drops below
+    // whole rather than both breaking into a ragged four-line block.
+    <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+      <span className="whitespace-nowrap text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">
         {children}
       </span>
-      {aside ? <span className="text-[11.5px] text-[var(--text-muted)]">{aside}</span> : null}
+      {aside ? <span className="whitespace-nowrap text-[11.5px] text-[var(--text-muted)]">{aside}</span> : null}
     </div>
   );
 }

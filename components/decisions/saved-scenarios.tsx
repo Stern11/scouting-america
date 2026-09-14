@@ -75,7 +75,8 @@ export function SavedScenarios({
                 type="button"
                 onClick={() => deleteScenario(scenario.id)}
                 title="Delete scenario"
-                className="flex-none text-[var(--text-muted)] transition-colors hover:text-[var(--risk-critical)]"
+                aria-label="Delete scenario"
+                className="grid size-8 flex-none place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] transition-colors hover:bg-[var(--interaction-hover)] hover:text-[var(--risk-critical)]"
               >
                 <Trash2 className="size-3.5" />
               </button>

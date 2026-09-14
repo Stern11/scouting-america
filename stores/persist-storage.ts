@@ -1,4 +1,5 @@
 import type { StateStorage } from "zustand/middleware";
+import { scopedKey } from "@/lib/utils/storage-scope";
 
 /**
  * SSR-safe Web Storage access for the zustand `persist` middleware.
@@ -54,6 +55,30 @@ export function webStorage(kind: "local" | "session"): StateStorage {
       } catch {
         /* ignore */
       }
+    },
+  };
+}
+
+/**
+ * `webStorage`, with every key suffixed by the signed-in account's namespace
+ * (see `lib/utils/storage-scope.ts`). With no account bound it reads nothing
+ * and writes nothing, so planning data never lands under a key another account
+ * on this browser would read.
+ */
+export function scopedWebStorage(kind: "local" | "session"): StateStorage {
+  const inner = webStorage(kind);
+  return {
+    getItem: (name) => {
+      const key = scopedKey(name);
+      return key === null ? null : inner.getItem(key);
+    },
+    setItem: (name, value) => {
+      const key = scopedKey(name);
+      if (key !== null) void inner.setItem(key, value);
+    },
+    removeItem: (name) => {
+      const key = scopedKey(name);
+      if (key !== null) void inner.removeItem(key);
     },
   };
 }

@@ -9,14 +9,23 @@
  * numbers on screen are theirs — and gives one way out.
  */
 
-import { LogOut } from "lucide-react";
+import { useState } from "react";
+import { LogOut, Trash2 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils/cn";
 import { signOut as oauthSignOut } from "next-auth/react";
 import { useCurrentUser } from "./use-current-user";
+import { removePlanningDataForAccount } from "@/stores/storage-scope";
 
 export function UserMenu({ collapsed = false }: { collapsed?: boolean }) {
   const { user } = useCurrentUser();
+  const [removing, setRemoving] = useState(false);
+
+  const signOutAndRemove = async () => {
+    setRemoving(true);
+    await removePlanningDataForAccount();
+    await oauthSignOut({ callbackUrl: "/welcome" });
+  };
 
   if (!user) return null;
 
@@ -59,7 +68,7 @@ export function UserMenu({ collapsed = false }: { collapsed?: boolean }) {
           <div className="truncate text-[11.5px] text-[var(--text-muted)]">{user.email}</div>
           {/* Never let a demo session read as a real one. */}
           <div className="mt-1.5 text-[11px] text-[var(--text-muted)]">
-            Signed in with Google · your planning data stays in this browser
+            Demo account · your planning data stays in this browser
           </div>
         </div>
         <button
@@ -71,9 +80,18 @@ export function UserMenu({ collapsed = false }: { collapsed?: boolean }) {
           <LogOut className="size-3.5" />
           Sign out
         </button>
+        <button
+          type="button"
+          disabled={removing}
+          onClick={() => void signOutAndRemove()}
+          className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-[12.5px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--interaction-hover)] hover:text-[var(--text-primary)] disabled:opacity-60"
+          style={{ transitionDuration: "var(--duration-fast)" }}
+        >
+          <Trash2 className="size-3.5" />
+          Sign out and remove my data
+        </button>
         <p className="border-t border-[var(--border)] px-3.5 py-2.5 text-[11px] leading-snug text-[var(--text-muted)]">
-          Signing out clears the session only. Your dataset, decisions and scenarios stay where they
-          are.
+          Your dataset, decisions and scenarios stay in this browser for your account only.
         </p>
       </PopoverContent>
     </Popover>

@@ -11,13 +11,26 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import type { ScenarioAdjustmentCategory, ScenarioAdjustments, SituationScenario } from "@/types/situation";
 import { EMPTY_ADJUSTMENTS } from "@/types/situation";
-import { analogueKey, capacityKey, mappingKey } from "@/lib/situations/scenario";
-import { webStorage } from "./persist-storage";
+import { analogueKey, capacityKey, mappingKey, sameAdjustments } from "@/lib/situations/scenario";
+import { scopedWebStorage } from "./persist-storage";
 
 export const SITUATION_SCENARIO_STORAGE_KEY = "heizen.situation-scenarios";
 
+/**
+ * A scenario with a draft. `adjustments` is what the lab shows and edits;
+ * `savedAdjustments` is the last saved snapshot. Both are overrides only.
+ */
+export interface DraftSituationScenario extends SituationScenario {
+  savedAdjustments: ScenarioAdjustments;
+}
+
+/** The draft differs from what was last saved. */
+export function isScenarioDirty(scenario: DraftSituationScenario | undefined): boolean {
+  return scenario !== undefined && !sameAdjustments(scenario.adjustments, scenario.savedAdjustments);
+}
+
 export interface SituationScenarioState {
-  scenarios: Record<string, SituationScenario>;
+  scenarios: Record<string, DraftSituationScenario>;
   activeScenarioId: string | null;
   /** Which numbers the workspace shows. Scenario state is always explicit. */
   viewMode: "baseline" | "scenario";
@@ -31,6 +44,10 @@ export interface SituationScenarioState {
   setActiveScenario: (scenarioId: string | null) => void;
   setViewMode: (mode: "baseline" | "scenario") => void;
   setNote: (scenarioId: string, note: string) => void;
+  /** Makes the current draft the saved snapshot. */
+  saveScenario: (scenarioId: string) => void;
+  /** Throws the draft away and restores the saved snapshot. */
+  discardChanges: (scenarioId: string) => void;
 
   setAvailableHours: (scenarioId: string, lineId: string, period: string, hours: number) => void;
   setTargetUtilization: (scenarioId: string, lineId: string, pct: number) => void;
@@ -110,7 +127,8 @@ export const useSituationScenarioStore = create<SituationScenarioState>()(
                 id,
                 name,
                 situationId,
-                adjustments: { ...EMPTY_ADJUSTMENTS, ...cloneAdjustments(EMPTY_ADJUSTMENTS) },
+                adjustments: cloneAdjustments(EMPTY_ADJUSTMENTS),
+                savedAdjustments: cloneAdjustments(EMPTY_ADJUSTMENTS),
                 createdAt: now,
                 updatedAt: now,
               },
@@ -133,6 +151,8 @@ export const useSituationScenarioStore = create<SituationScenarioState>()(
                 id,
                 name: `${source.name} copy`,
                 adjustments: cloneAdjustments(source.adjustments),
+                // A copy starts saved as it was made.
+                savedAdjustments: cloneAdjustments(source.adjustments),
                 createdAt: now,
                 updatedAt: now,
               },
@@ -172,6 +192,30 @@ export const useSituationScenarioStore = create<SituationScenarioState>()(
             const scenario = state.scenarios[scenarioId];
             if (!scenario) return state;
             return { scenarios: { ...state.scenarios, [scenarioId]: { ...scenario, note } } };
+          }),
+
+        saveScenario: (scenarioId) =>
+          set((state) => {
+            const scenario = state.scenarios[scenarioId];
+            if (!scenario) return state;
+            return {
+              scenarios: {
+                ...state.scenarios,
+                [scenarioId]: { ...scenario, savedAdjustments: cloneAdjustments(scenario.adjustments) },
+              },
+            };
+          }),
+
+        discardChanges: (scenarioId) =>
+          set((state) => {
+            const scenario = state.scenarios[scenarioId];
+            if (!scenario) return state;
+            return {
+              scenarios: {
+                ...state.scenarios,
+                [scenarioId]: { ...scenario, adjustments: cloneAdjustments(scenario.savedAdjustments) },
+              },
+            };
           }),
 
         setAvailableHours: (scenarioId, lineId, period, hours) =>
@@ -217,24 +261,32 @@ export const useSituationScenarioStore = create<SituationScenarioState>()(
     },
     {
       name: SITUATION_SCENARIO_STORAGE_KEY,
-      // 2 added `volumeUnits`. Without the migration below, a scenario saved
-      // under v1 rehydrates with that map undefined and every control reading
-      // it throws on the first render.
-      version: 2,
-      migrate: (persisted, version) => {
-        const state = persisted as { scenarios?: Record<string, SituationScenario> } | undefined;
-        if (!state?.scenarios || version >= 2) return persisted;
+      // 2 added `volumeUnits`. Without it, a scenario saved under v1
+      // rehydrates with that map undefined and every control reading it throws.
+      // 3 added `savedAdjustments`: what a scenario already held is treated as
+      // saved, so nobody is asked to save work they never touched.
+      version: 3,
+      migrate: (persisted) => {
+        const state = persisted as { scenarios?: Record<string, SituationScenario & { savedAdjustments?: ScenarioAdjustments }> } | undefined;
+        if (!state?.scenarios) return persisted;
         return {
           ...state,
           scenarios: Object.fromEntries(
-            Object.entries(state.scenarios).map(([id, scenario]) => [
-              id,
-              { ...scenario, adjustments: cloneAdjustments(scenario.adjustments) },
-            ])
+            Object.entries(state.scenarios).map(([id, scenario]) => {
+              const adjustments = cloneAdjustments(scenario.adjustments);
+              return [
+                id,
+                {
+                  ...scenario,
+                  adjustments,
+                  savedAdjustments: cloneAdjustments(scenario.savedAdjustments ?? adjustments),
+                },
+              ];
+            })
           ),
         };
       },
-      storage: createJSONStorage(() => webStorage("local")),
+      storage: createJSONStorage(() => scopedWebStorage("local")),
       skipHydration: true,
       partialize: (state) => ({
         scenarios: state.scenarios,

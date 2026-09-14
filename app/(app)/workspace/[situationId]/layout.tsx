@@ -1,33 +1,27 @@
 "use client";
 
 /**
- * The situation workflow frame (V2 §41).
+ * The situation frame (V2 §41).
  *
- * Reconcile -> Decide, as top step navigation so a planner can move between
- * steps freely rather than being marched through a wizard. The situation
- * header stays put so the context never disappears.
+ * A programme is one view: Reconcile. There is no Decide step — whatever the
+ * planner does here (carry an item forward, exit it) creates dated decisions,
+ * and those are handled on Decisions with every other programme's. The
+ * situation header stays put so the context never disappears.
  *
  * There is deliberately no Plan Supply or Check Capacity step. Material and
  * capacity consequences are not separate subjects a planner visits — they are
  * what a *particular* unrepresented item does, and reading them as portfolio
  * aggregates hid the very thing that caused them. They live inside the SKU
- * drawer on Reconcile, and roll up on Decide.
+ * drawer on Reconcile, and roll up on Decisions.
  */
 
 import Link from "next/link";
 import { use } from "react";
-import { usePathname } from "next/navigation";
 import { ArrowLeft, FlaskConical } from "lucide-react";
 import { useSituation } from "@/components/dataset/dataset-provider";
 import { StateBadge } from "@/components/shared/state-badge";
 import { NotAvailable, Page } from "@/components/shared/page";
-import { cn } from "@/lib/utils/cn";
 import { fmtDateShort } from "@/lib/utils/format";
-
-const STEPS = [
-  { slug: "reconcile", label: "Reconcile", question: "What isn't represented?" },
-  { slug: "decide", label: "Decide", question: "What should I do?" },
-];
 
 export default function SituationLayout({
   children,
@@ -38,7 +32,6 @@ export default function SituationLayout({
 }) {
   const { situationId } = use(params);
   const situation = useSituation(situationId);
-  const pathname = usePathname();
 
   if (!situation) {
     return (
@@ -59,18 +52,18 @@ export default function SituationLayout({
     );
   }
 
-  const activeIndex = STEPS.findIndex((s) => pathname.endsWith(`/${s.slug}`));
-
   return (
     <div>
-      {/* Sticky so the programme and the step you are on stay visible while
-          you scroll a long list — losing your place in the workflow is the
-          fastest way to stop trusting a number you are looking at. */}
-      <div className="sticky top-0 z-30 border-b border-[var(--border)] bg-[var(--surface)]">
-        <div className="mx-auto w-full max-w-[1360px] px-4 pt-3 sm:px-8 sm:pt-4">
+      {/* Sticky so the programme stays visible while you scroll a long list —
+          losing your place is the fastest way to stop trusting a number you
+          are looking at. */}
+      {/* Not sticky on a phone: pinned, it took a quarter of the screen from
+          the list it is meant to keep in context. */}
+      <div className="relative z-30 border-b border-[var(--border)] bg-[var(--surface)] sm:sticky sm:top-0">
+        <div className="mx-auto w-full max-w-[1360px] px-4 py-3 sm:px-8 sm:py-4">
           <Link
             href="/workspace"
-            className="mb-3 inline-flex items-center gap-1.5 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+            className="-my-1.5 mb-1.5 inline-flex h-8 items-center gap-1.5 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
           >
             <ArrowLeft className="size-3" />
             Planning Workspace
@@ -100,32 +93,6 @@ export default function SituationLayout({
               Open in Scenario Lab
             </Link>
           </div>
-
-          <nav className="mt-4 flex gap-1">
-            {STEPS.map((step, index) => {
-              const active = index === activeIndex;
-              return (
-                <Link
-                  key={step.slug}
-                  href={`/workspace/${situationId}/${step.slug}`}
-                  className={cn(
-                    "relative flex items-baseline gap-2 rounded-t-[var(--radius-sm)] px-3.5 py-2.5 text-[13px] transition-colors",
-                    active
-                      ? "font-medium text-[var(--text-primary)]"
-                      : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                  )}
-                >
-                  <span className={cn("tabular-nums", active ? "text-[var(--accent)]" : "text-[var(--text-muted)]")}>
-                    {index + 1}
-                  </span>
-                  {step.label}
-                  {active ? (
-                    <span className="absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-[var(--accent)]" />
-                  ) : null}
-                </Link>
-              );
-            })}
-          </nav>
         </div>
       </div>
 

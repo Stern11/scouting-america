@@ -22,6 +22,7 @@ import type {
   ItemLineMappingRow,
   LeadTimeHistoryRow,
   LineCapacityRow,
+  LineHistoryRow,
   MappingLevel,
   PlanningDataset,
   RawPlanningInput,
@@ -57,6 +58,7 @@ export function normalizePlanningInput(
   const leadTimeHistory = normalizeLeadTimeHistory(input.leadTimeHistory ?? [], collector);
   const inventorySupply = normalizeInventorySupply(input.inventorySupply ?? [], collector);
   const readinessHistory = normalizeReadinessHistory(input.readinessHistory ?? [], collector);
+  const lineHistory = normalizeLineHistory(input.lineHistory ?? [], collector);
 
   const capabilities: DatasetCapabilities = {
     reconciliation:
@@ -66,6 +68,7 @@ export function normalizePlanningInput(
     leadTimeAnalysis: leadTimeHistory.length > 0,
     netRequirements: inventorySupply.length > 0,
     readinessHistory: readinessHistory.length > 0,
+    lineHistory: lineHistory.length > 0,
   };
 
   const dataset: PlanningDataset = {
@@ -79,6 +82,7 @@ export function normalizePlanningInput(
     leadTimeHistory,
     inventorySupply,
     readinessHistory,
+    lineHistory,
   };
 
   crossReference(dataset, collector);
@@ -647,6 +651,8 @@ function normalizeLeadTimeHistory(rows: RawRow[], collector: IssueCollector): Le
       specificationFamily: coerceString(readCell(row, "specification_family")),
       plant: coerceString(readCell(row, "plant")),
       systemLeadTimeDays: coerceNumber(readCell(row, "system_lead_time_days")),
+      promisedDate: optionalDate(row, "promised_date", sheet, rowNumber, collector),
+      receivedQuantity: coerceNumber(readCell(row, "received_qty")),
       actualLeadTimeDays,
     });
   });
@@ -740,6 +746,59 @@ function normalizeReadinessHistory(rows: RawRow[], collector: IssueCollector): R
       weeksBeforeProductionStart: Math.round(weeksBeforeProductionStart),
       representedPct,
       asOfDate: optionalDate(row, "as_of_date", sheet, rowNumber, collector),
+      notes: coerceString(readCell(row, "notes")),
+    });
+  });
+  return out;
+}
+
+function normalizeLineHistory(rows: RawRow[], collector: IssueCollector): LineHistoryRow[] {
+  const sheet: SheetName = "Line_History";
+  const out: LineHistoryRow[] = [];
+  rows.forEach((row, i) => {
+    const rowNumber = i + FIRST_DATA_ROW;
+    const period = requireString(row, "period", sheet, rowNumber, collector);
+    const plant = requireString(row, "plant", sheet, rowNumber, collector);
+    const lineId = requireString(row, "line_id", sheet, rowNumber, collector);
+    const scheduledHours = requireNumber(row, "scheduled_hours", sheet, rowNumber, collector, { min: 0 });
+    const runHours = requireNumber(row, "run_hours", sheet, rowNumber, collector, { min: 0 });
+    if (!period || !plant || !lineId || scheduledHours === undefined || runHours === undefined) return;
+
+    if (!/^\d{4}-\d{2}$/.test(period)) {
+      collector.error(sheet, "invalid_period", "period must be a calendar month written as YYYY-MM.", {
+        column: "period",
+        row: rowNumber,
+      });
+      return;
+    }
+
+    // Absent stays absent: a blank downtime column is "not recorded", which is
+    // a different statement from "no downtime".
+    const optional = (column: string): number | undefined => {
+      const raw = readCell(row, column);
+      if (isBlank(raw)) return undefined;
+      const value = coerceNumber(raw);
+      if (value === undefined || value < 0) {
+        collector.warn(sheet, `invalid_${column}`, `${column} is not a non-negative number and was ignored.`, {
+          column,
+          row: rowNumber,
+        });
+        return undefined;
+      }
+      return value;
+    };
+
+    out.push({
+      id: `lh_${i}`,
+      period,
+      plant,
+      lineId,
+      scheduledHours,
+      runHours,
+      unplannedDowntimeHours: optional("unplanned_downtime_hours"),
+      overtimeHours: optional("overtime_hours"),
+      lateArrivals: optional("late_arrivals"),
+      lateArrivalHoursLost: optional("late_arrival_hours_lost"),
       notes: coerceString(readCell(row, "notes")),
     });
   });

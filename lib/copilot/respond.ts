@@ -404,9 +404,9 @@ function tryNavigate(question: string, ctx: CopilotContext): CopilotReply | null
     const situation = resolveSituation(question, ctx);
     if (!situation) return needSituationReply(ctx);
     return {
-      text: `Opening Decide for ${situation.title}.`,
-      action: { kind: "navigate", href: `/workspace/${situation.id}/decide` },
-      visualsUpdated: ["Decide"],
+      text: `Opening Decisions for ${situation.title}.`,
+      action: { kind: "navigate", href: `/decisions?programme=${situation.id}` },
+      visualsUpdated: ["Decisions"],
     };
   }
   return null;

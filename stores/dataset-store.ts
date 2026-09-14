@@ -18,7 +18,7 @@ import type {
   VolumeCommitment,
 } from "@/types/situation";
 import type { DatasetMode } from "@/types/dataset";
-import { webStorage } from "./persist-storage";
+import { scopedWebStorage } from "./persist-storage";
 import { DEFAULT_DEMO_SEED } from "@/lib/dataset/demo/generate";
 
 export const DATASET_STORAGE_KEY = "heizen.dataset";
@@ -33,7 +33,7 @@ export interface DatasetStoreState {
   /** Uploaded only. */
   uploadedFileName: string | null;
   uploadedAt: string | null;
-  /** True once an uploaded dataset is known to be in IndexedDB. */
+  /** True once an uploaded dataset is known to be in IndexedDB, not just held in this tab. */
   hasStoredUpload: boolean;
 
   activeSituationId: string | null;
@@ -45,7 +45,8 @@ export interface DatasetStoreState {
 
   chooseDemo: (seed?: string) => void;
   regenerateDemo: (seed: string) => void;
-  chooseUpload: (input: { fileName: string; uploadedAt: string; datasetName: string }) => void;
+  /** `stored` is whether the workbook actually reached IndexedDB. */
+  chooseUpload: (input: { fileName: string; uploadedAt: string; datasetName: string; stored: boolean }) => void;
   clearDataset: () => void;
 
   setActiveSituation: (id: string | null) => void;
@@ -105,14 +106,14 @@ export const useDatasetStore = create<DatasetStoreState>()(
           activeSituationId: null,
         }),
 
-      chooseUpload: ({ fileName, uploadedAt, datasetName }) =>
+      chooseUpload: ({ fileName, uploadedAt, datasetName, stored }) =>
         set({
           mode: "UPLOADED",
           datasetId: `upload:${uploadedAt}`,
           datasetName,
           uploadedFileName: fileName,
           uploadedAt,
-          hasStoredUpload: true,
+          hasStoredUpload: stored,
           overridesBySituation: {},
           activeSituationId: null,
         }),
@@ -256,8 +257,9 @@ export const useDatasetStore = create<DatasetStoreState>()(
       name: DATASET_STORAGE_KEY,
       version: 1,
       // localStorage, not session: the chosen mode should survive a refresh so
-      // the planner is not sent back to the first-run screen.
-      storage: createJSONStorage(() => webStorage("local")),
+      // the planner is not sent back to the first-run screen. Scoped to the
+      // signed-in account — see `stores/storage-scope.ts`.
+      storage: createJSONStorage(() => scopedWebStorage("local")),
       skipHydration: true,
       partialize: (state) => ({
         mode: state.mode,

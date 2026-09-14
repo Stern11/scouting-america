@@ -1,7 +1,7 @@
 /**
  * What a planner has to decide, and by when (V2 §49-50).
  *
- * The Decide step used to open on "Runway remaining: 10 weeks" with nothing
+ * Decisions used to open on "Runway remaining: 10 weeks" with nothing
  * saying whose runway that was. A date with no subject is not a decision — it
  * is a number a planner has to go and reconstruct the meaning of.
  *
@@ -19,6 +19,7 @@ import type {
   SituationOverrides,
   VolumeCommitment,
 } from "@/types/situation";
+import { isUndecided, skuCounts } from "./horizon";
 
 export type DecisionKind = "material_order" | "line_capacity" | "production_start" | "representation";
 
@@ -37,10 +38,17 @@ export interface PendingDecision {
   /** True once the planner has released it. */
   released?: boolean;
   releasedAt?: string;
+  /** The supplier it was awarded to, when the planner chose one. */
+  releasedTo?: string;
   /** What is being decided, in the planner's words. */
   title: string;
   /** The date it stops being reversible. Absent for undated work. */
   date?: string;
+  /**
+   * What that date is — "Order by", "Resolve by", "Starts". A bare date on a
+   * list of mixed decisions left the planner guessing which kind it was.
+   */
+  dateLabel: string;
   weeksAway?: number;
   urgency: DecisionUrgency;
   /** One line saying what happens at that date. */
@@ -73,7 +81,7 @@ export function urgencyOf(weeksAway: number | undefined): DecisionUrgency {
  */
 export function pendingDecisions(
   situation: PlanningSituation,
-  releases: Readonly<Record<string, { releasedAt: string }>> = {}
+  releases: Readonly<Record<string, { releasedAt: string; supplierName?: string }>> = {}
 ): PendingDecision[] {
   const out: PendingDecision[] = [];
   const { materialExposure, capacityExposure, runway, bridge, candidateItems } = situation;
@@ -97,13 +105,15 @@ export function pendingDecisions(
         uom: row.uom,
         released: release !== undefined,
         releasedAt: release?.releasedAt,
+        releasedTo: release?.supplierName,
         title: `Order ${row.materialName}`,
         date: row.decisionDate,
+        dateLabel: "Order by",
         weeksAway: row.weeksToDecision,
         urgency: release ? "later" : urgencyOf(row.weeksToDecision),
         consequence:
           row.leadTimeDays > 0
-            ? `${row.leadTimeDays}-day lead time`
+            ? `Arrives ${row.leadTimeDays} days after ordering`
             : "Needed before the build starts",
         drivenBy: drivers,
         href: `/workspace/${situation.id}/reconcile`,
@@ -132,22 +142,23 @@ export function pendingDecisions(
         kind: "line_capacity",
         title: `Resolve load on ${first.lineName}`,
         date: monthStart,
+        dateLabel: "Resolve by",
         weeksAway: marker?.weeksAway,
         urgency: urgencyOf(marker?.weeksAway),
         consequence: `Runs at ${Math.round(first.effectiveUtilization * 100)}% against a ${Math.round(
           first.targetUtilizationPct * 100
         )}% target. Move it, build it earlier, or accept the overtime.`,
         drivenBy: drivers,
-        href: `/scenario-lab?situation=${situation.id}`,
+        href: `/scenario-lab?mode=capacity&situation=${situation.id}`,
         cta: "Test it in Scenario Lab",
       });
     }
   }
 
   /* ---- representation: undecided items hold everything else up ---- */
-  const undecided = candidateItems.filter(
-    (c) => c.disposition === "unreviewed" || c.disposition === "under_review"
-  );
+  // The same "to decide" every page counts (`skuCounts`), so this title and
+  // the Overview headline name the same number.
+  const undecided = candidateItems.filter((c) => isUndecided(c.disposition));
   if (undecided.length > 0) {
     const productionStart = situation.productionWindow?.start;
     const marker = runway.markers.find((m) => m.kind === "production_start");
@@ -156,6 +167,7 @@ export function pendingDecisions(
       kind: "representation",
       title: `Decide on ${undecided.length} product${undecided.length === 1 ? "" : "s"}`,
       date: productionStart,
+      dateLabel: "Decide by",
       weeksAway: marker?.weeksAway,
       urgency: urgencyOf(marker?.weeksAway),
       consequence:
@@ -174,6 +186,7 @@ export function pendingDecisions(
       kind: "production_start",
       title: "Production starts",
       date: situation.productionWindow.start,
+      dateLabel: "Starts",
       weeksAway: marker?.weeksAway,
       urgency: urgencyOf(marker?.weeksAway),
       consequence: "Everything above has to be settled before the first build day.",
@@ -186,10 +199,19 @@ export function pendingDecisions(
   return out.sort(soonestFirst);
 }
 
+export interface BlockedMaterial {
+  materialName: string;
+  reason: string;
+  blockedBy?: string;
+}
+
+/** Products still to decide across these programmes — the Decisions page's count. */
+export function undecidedProductCount(situations: readonly PlanningSituation[]): number {
+  return situations.reduce((n, s) => n + skuCounts(s).toDecide, 0);
+}
+
 /** Components that cannot be committed yet, and the item each is waiting on. */
-export function blockedMaterials(
-  situation: PlanningSituation
-): { materialName: string; reason: string; blockedBy?: string }[] {
+export function blockedMaterials(situation: PlanningSituation): BlockedMaterial[] {
   if (!situation.materialExposure.available) return [];
   return situation.materialExposure.rows
     .filter((r) => r.status === "WAIT")
@@ -198,6 +220,17 @@ export function blockedMaterials(
       reason: r.reason,
       blockedBy: r.blockedByItemName,
     }));
+}
+
+/**
+ * The one decision a page should lead with: the soonest that still needs the
+ * planner. A released order has been taken, and a component stock already
+ * covers has no order to place, so neither can be it. Anything dated inside
+ * the next twelve weeks beats something further out or undated.
+ */
+export function nextDecision<T extends PendingDecision>(decisions: readonly T[]): T | undefined {
+  const open = (d: T) => !d.released && !(d.materialId && d.quantity !== undefined && d.quantity < 0.5);
+  return decisions.find((d) => open(d) && d.urgency !== "later") ?? decisions.find(open);
 }
 
 /** Dated before undated; dated in calendar order. */
@@ -227,7 +260,10 @@ export interface ProgrammeDecision extends PendingDecision {
  *
  * A released order has been decided, so it leaves this list for the
  * committed log. Production start is a milestone rather than a choice; it
- * stays on each programme's own Decide step, where it frames the rest.
+ * shows on a single programme's production and sales timing instead.
+ *
+ * Nothing registers a decision: they derive from each situation, so carrying
+ * an item forward on Reconcile puts its components on this list by itself.
  */
 export function upcomingDecisions(
   situations: readonly PlanningSituation[],
@@ -249,8 +285,35 @@ export function upcomingDecisions(
   return out.sort(soonestFirst);
 }
 
-/** The record a planner's "Release" creates — undefined for anything but a dated order. */
-export function releaseFor(decision: PendingDecision, releasedAt: string): MaterialRelease | undefined {
+/** A component held by a decision, placed in the programme it belongs to. */
+export interface ProgrammeBlockedMaterial extends BlockedMaterial {
+  key: string;
+  situationId: string;
+  situationTitle: string;
+}
+
+/** Every programme's components that cannot be committed yet. */
+export function blockedAcrossProgrammes(situations: readonly PlanningSituation[]): ProgrammeBlockedMaterial[] {
+  return situations.flatMap((situation) =>
+    blockedMaterials(situation).map((row, i) => ({
+      ...row,
+      key: `${situation.id}:blocked:${i}:${row.materialName}`,
+      situationId: situation.id,
+      situationTitle: situation.title,
+    }))
+  );
+}
+
+/**
+ * The record a planner's "Release" creates — undefined for anything but a
+ * dated order. The supplier is whoever the planner awarded it to; absent when
+ * there was no supplier history to choose from.
+ */
+export function releaseFor(
+  decision: PendingDecision,
+  releasedAt: string,
+  supplier?: { supplierId: string; supplierName: string }
+): MaterialRelease | undefined {
   if (!decision.materialId || !decision.date) return undefined;
   return {
     materialId: decision.materialId,
@@ -259,6 +322,7 @@ export function releaseFor(decision: PendingDecision, releasedAt: string): Mater
     uom: decision.uom ?? "",
     decisionDate: decision.date,
     releasedAt,
+    ...(supplier ? { supplierId: supplier.supplierId, supplierName: supplier.supplierName } : {}),
   };
 }
 

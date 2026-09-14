@@ -14,6 +14,7 @@ import { parseWorkbook } from "@/lib/excel/parse";
 import { applyMapping, planColumnMapping, type MappingPlan } from "@/lib/excel/column-mapping";
 import { REQUIRED_SHEETS, sheetSpec } from "@/lib/excel/schema";
 import type { DatasetCapabilities, PlanningDataset, RawPlanningInput, RawRow } from "@/types/dataset";
+import { ambiguousIdentityRows } from "@/lib/situations/volume";
 
 /** The compact review shown before "Run planning" (V2 §30). */
 export interface PlanningScopePreview {
@@ -101,7 +102,15 @@ export function validateWorkbook(
   }
 
   const mappedSheets = applyMapping(parsed, plan);
-  const currency = detectCurrency(mappedSheets);
+  const currencies = detectCurrencies(mappedSheets);
+  const currency = currencies[0] ?? "USD";
+  if (currencies.length > 1) {
+    collector.warn(
+      "Workbook",
+      "mixed_currency",
+      `Values are in ${currencies.join(", ")}. Heizen doesn't convert currency, so keep each programme in one currency.`
+    );
+  }
 
   const input: RawPlanningInput = {
     metadata: {
@@ -122,11 +131,22 @@ export function validateWorkbook(
     leadTimeHistory: mappedSheets.get("Lead_Time_History"),
     inventorySupply: mappedSheets.get("Inventory_Supply"),
     readinessHistory: mappedSheets.get("Readiness_History"),
+    lineHistory: mappedSheets.get("Line_History"),
   };
 
   // normalizePlanningInput raises all row-level issues itself into the same
   // collector — we never duplicate its checks here.
   const { dataset } = normalizePlanningInput(input, collector);
+
+  // Warned rather than merged: rows the attributes cannot tell apart are kept
+  // as separate products, but a planner should know why.
+  ambiguousIdentityRows(dataset.historicalItems).forEach(() =>
+    collector.warn(
+      "Historical_Items",
+      "ambiguous_identity",
+      "These prior items share every identifying attribute with another item in the same season, so they are told apart by item name. Check they aren't duplicates."
+    )
+  );
 
   for (const gap of capabilityGaps(dataset)) {
     collector.info(gap.sheet, gap.code, gap.message);
@@ -140,7 +160,8 @@ export function validateWorkbook(
 
 /* ------------------------------------------------------------------ */
 
-function detectCurrency(mappedSheets: Map<SheetName, RawRow[]>): string {
+/** Every currency named in the value-bearing sheets, most used first. */
+function detectCurrencies(mappedSheets: Map<SheetName, RawRow[]>): string[] {
   const counts = new Map<string, number>();
   const sheetsToScan: SheetName[] = ["Business_Plan", "Current_Plan", "Historical_Items"];
 
@@ -154,15 +175,9 @@ function detectCurrency(mappedSheets: Map<SheetName, RawRow[]>): string {
     }
   }
 
-  let best: string | null = null;
-  let bestCount = 0;
-  for (const [value, count] of counts) {
-    if (count > bestCount) {
-      best = value;
-      bestCount = count;
-    }
-  }
-  return best ?? "USD";
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([value]) => value);
 }
 
 interface CapabilityGap {
@@ -202,6 +217,12 @@ const CAPABILITY_MESSAGES: readonly CapabilityGap[] = [
     sheet: "Readiness_History",
     code: "capability_readinesshistory_unavailable",
     message: "Add weekly readiness history to see this season's pace against last year's.",
+  },
+  {
+    key: "lineHistory",
+    sheet: "Line_History",
+    code: "capability_linehistory_unavailable",
+    message: "Add Line_History to see each line's past downtime, overtime and late material arrivals.",
   },
 ];
 

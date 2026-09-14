@@ -91,18 +91,25 @@ export interface BuildSituationsOptions {
    */
   leadTimeOverrideDays?: Record<string, number>;
   /**
-   * Scenario carry-forward volumes by candidate id. Threaded as an option
-   * rather than applied to a dataset copy on purpose: the override replaces
-   * the *resolved plan* for a SKU, and must not rewrite the historical actual
-   * it was derived from.
+   * Scenario carry-forward volumes, keyed by situation id and then candidate
+   * id. Threaded as an option rather than applied to a dataset copy on
+   * purpose: the override replaces the *resolved plan* for a SKU, and must not
+   * rewrite the historical actual it was derived from.
+   *
+   * Scoped by situation because a candidate id names a *product*, and the same
+   * product can run in more than one programme. A flat map would let a volume
+   * set for Halloween move the same product's Holiday plan too.
+   *
+   * Committed volumes are not passed here: they live in each situation's own
+   * `overrides.commitments` and are applied from there, beneath these.
    */
-  volumeOverrideUnits?: Record<string, number>;
+  volumeOverridesBySituation?: Record<string, Record<string, number>>;
   /**
-   * Scenario analogue weights, keyed `${candidateId}::${analogueId}`. Zero
-   * takes an analogue out of the blend that derives a not-yet-specified
-   * item's components.
+   * Scenario analogue weights by situation id, each keyed
+   * `${candidateId}::${analogueId}`. Zero takes an analogue out of the blend
+   * that derives a not-yet-specified item's components.
    */
-  analogueWeightOverrides?: Record<string, number>;
+  analogueWeightsBySituation?: Record<string, Record<string, number>>;
 }
 
 export function buildSituations(
@@ -115,19 +122,87 @@ export function buildSituations(
   // occupy, so it is computed once across every formal item.
   const formalLoad = formalLineLoad(dataset);
 
-  return scopes
-    .map((scope) =>
-      buildSituation(
-        dataset,
-        scope,
-        formalLoad,
-        options.overridesBySituation?.[scope.id] ?? EMPTY_SITUATION_OVERRIDES,
-        options.leadTimeOverrideDays,
-        options.volumeOverrideUnits,
-        options.analogueWeightOverrides
-      )
+  const built = scopes.map((scope) =>
+    buildSituation(
+      dataset,
+      scope,
+      formalLoad,
+      options.overridesBySituation?.[scope.id] ?? EMPTY_SITUATION_OVERRIDES,
+      options.leadTimeOverrideDays,
+      options.volumeOverridesBySituation?.[scope.id],
+      options.analogueWeightsBySituation?.[scope.id]
     )
-    .sort((a, b) => b.bridge.unresolvedValue - a.bridge.unresolvedValue);
+  );
+
+  return withPortfolioLoad(built, dataset.metadata.planningNow.slice(0, 10)).sort(
+    (a, b) => b.bridge.unresolvedValue - a.bridge.unresolvedValue
+  );
+}
+
+/**
+ * Puts every programme's carry-forward on every programme's lines.
+ *
+ * Formal load was already plant-wide; carry-forward was not, so Halloween's
+ * July cell on a line showed Halloween's hours on the formal plan while
+ * Overview's line load — and Scenario Lab — showed Halloween's and Holiday's.
+ * One line-month, two utilisations. A line cannot tell which programme an hour
+ * belongs to, so neither may the figure a planner reads off it.
+ *
+ * A second pass because the other programmes' hours only exist once every
+ * programme is built. Only what depends on utilisation is re-derived — the
+ * capacity summary, the runway and the attention state; the bridge and every
+ * unit figure are untouched. Attribution stays per programme: `unresolvedHours`
+ * and `contributors` are still this programme's own.
+ */
+function withPortfolioLoad(situations: PlanningSituation[], now: string): PlanningSituation[] {
+  const carryForward = new Map<string, number>();
+  for (const s of situations) {
+    for (const c of s.capacityExposure.cells) {
+      const key = loadKey(c.lineId, c.period);
+      carryForward.set(key, (carryForward.get(key) ?? 0) + c.unresolvedHours);
+    }
+  }
+
+  return situations.map((s) => {
+    if (!s.capacityExposure.available) return s;
+    const cells = s.capacityExposure.cells.map((c) => {
+      const otherProgrammeHours = Math.max(0, (carryForward.get(loadKey(c.lineId, c.period)) ?? 0) - c.unresolvedHours);
+      const effectiveHours = c.formalHours + otherProgrammeHours + c.unresolvedHours;
+      return {
+        ...c,
+        otherProgrammeHours,
+        effectiveHours,
+        effectiveUtilization: c.availableHours > 0 ? effectiveHours / c.availableHours : 0,
+      };
+    });
+    const capacityExposure: CapacityExposure = { ...s.capacityExposure, cells, ...summarizeCells(cells) };
+    const runway = buildRunway(now, s.productionWindow, s.salesWindow, s.materialExposure, capacityExposure);
+    return {
+      ...s,
+      capacityExposure,
+      runway,
+      state: deriveState(s.bridge, runway, capacityExposure, s.lifecycle),
+    };
+  });
+}
+
+/**
+ * The lines this programme's carry-forward helps push past target, and the
+ * worst cell. A line past target on formal work alone is not something this
+ * programme found — the same rule as Overview's exposed lines and Decisions.
+ */
+function summarizeCells(cells: readonly CapacityCell[]): Pick<CapacityExposure, "exposedLineIds" | "peak"> {
+  return {
+    exposedLineIds: [...new Set(cells.filter(breachesTarget).map((c) => c.lineId))],
+    peak: cells.reduce<CapacityCell | undefined>(
+      (worst, cell) => (worst === undefined || cell.effectiveUtilization > worst.effectiveUtilization ? cell : worst),
+      undefined
+    ),
+  };
+}
+
+function breachesTarget(cell: CapacityCell): boolean {
+  return cell.effectiveUtilization > cell.targetUtilizationPct && cell.unresolvedHours > 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -224,10 +299,17 @@ function buildSituation(
   // Collapse to one row per SKU *before* matching runs: three seasons of the
   // same product are three observations of one thing to plan, and letting each
   // compete separately for the same plan item would double-count it.
+  //
+  // A committed volume is part of the baseline from the moment it is committed.
+  // It is read from this situation's own overrides — never from a map shared
+  // across programmes — and a scenario value tested on top of it wins.
+  const committedUnits = Object.fromEntries(
+    Object.values(overrides.commitments ?? {}).map((c) => [c.candidateId, c.units])
+  );
   const collapsed = collapseToSkus(allPriorRows, {
     selectedPeriods: selectedSeasons,
     businessGrowthPct,
-    volumeOverrides: volumeOverrideUnits,
+    volumeOverrides: { ...committedUnits, ...volumeOverrideUnits },
   });
   const priorRows = collapsed.map((c) => c.row);
   const volumeById = new Map(collapsed.map((c) => [c.row.id, c]));
@@ -306,6 +388,7 @@ function buildSituation(
     leadTimeOverrideDays,
     bomByParent
   );
+  assignCandidateDeadlines(candidates, dataset, productionWindow, now, leadTimeOverrideDays, bomByParent);
   const runway = buildRunway(now, productionWindow, salesWindow, materialExposure, capacityExposure);
 
   const lifecycle = deriveLifecycle(bridge);
@@ -456,6 +539,7 @@ function buildBridge(
     unresolvedValue,
     expectedUnits,
     formalUnits,
+    formalItemCount: currentRows.length,
     unresolvedUnits,
     representedPct: expectedValue > 0 ? Math.min(1, formalValue / expectedValue) : 0,
     explainedValue,
@@ -491,7 +575,7 @@ function formalLineLoad(dataset: PlanningDataset): Map<string, number> {
     if (!window) continue;
     const weights = monthWeights(window);
     for (const mapping of mappings) {
-      const share = mapping.allocationPct ?? 1 / mappings.length;
+      const share = lineShare(mapping, mappings);
       const hours = (item.plannedUnits * share) / mapping.runRateUnitsPerHour;
       for (const [month, weight] of weights) {
         const key = loadKey(mapping.lineId, month);
@@ -500,6 +584,19 @@ function formalLineLoad(dataset: PlanningDataset): Map<string, number> {
     }
   }
   return load;
+}
+
+/**
+ * The share of an item's volume one mapping sends to its line.
+ *
+ * Shares are normalised across the item's mappings so they always add to 100%:
+ * a workbook declaring 100% on two lines means an even split, never double the
+ * volume. Mappings without a share take an equal part before normalising.
+ */
+export function lineShare(mapping: ItemLineMappingRow, mappings: readonly ItemLineMappingRow[]): number {
+  const raw = (m: ItemLineMappingRow) => m.allocationPct ?? 1 / mappings.length;
+  const total = mappings.reduce((sum, m) => sum + Math.max(0, raw(m)), 0);
+  return total > 0 ? Math.max(0, raw(mapping)) / total : 1 / mappings.length;
 }
 
 /**
@@ -583,7 +680,7 @@ function buildCapacityExposure(
     }
 
     for (const mapping of mappings) {
-      const share = mapping.allocationPct ?? 1 / mappings.length;
+      const share = lineShare(mapping, mappings);
       const hours = (candidate.plannedUnits * share) / mapping.runRateUnitsPerHour;
       for (const [month, weight] of weights) {
         const key = loadKey(mapping.lineId, month);
@@ -639,6 +736,8 @@ function buildCapacityExposure(
       targetUtilizationPct: row.targetUtilizationPct ?? DEFAULT_TARGET_UTILIZATION,
       formalHours,
       unresolvedHours,
+      // Filled in by `withPortfolioLoad` once every programme is built.
+      otherProgrammeHours: 0,
       effectiveHours,
       formalUtilization: available > 0 ? formalHours / available : 0,
       effectiveUtilization: available > 0 ? effectiveHours / available : 0,
@@ -648,13 +747,7 @@ function buildCapacityExposure(
     });
   }
 
-  const exposedLineIds = [
-    ...new Set(cells.filter((c) => c.effectiveUtilization > c.targetUtilizationPct).map((c) => c.lineId)),
-  ];
-  const peak = cells.reduce<CapacityCell | undefined>(
-    (worst, cell) => (worst === undefined || cell.effectiveUtilization > worst.effectiveUtilization ? cell : worst),
-    undefined
-  );
+  const { exposedLineIds, peak } = summarizeCells(cells);
 
   return {
     cells,
@@ -919,6 +1012,53 @@ function materialReason(
   return `Packaging decision follows the final item, on ${pct}% of comparable items.`;
 }
 
+/**
+ * Every candidate's own deadline: the date its longest-lead component has to
+ * be ordered for the item to be built on time.
+ *
+ * Set on every candidate — not only carry-forward ones — because the date an
+ * undecided item stops being possible is exactly what tells a planner which
+ * decision to make first. Reads the same components the material exposure
+ * explodes (own BOM, else the analogue blend) and the same lead times,
+ * including a scenario override.
+ */
+function assignCandidateDeadlines(
+  candidates: CandidateItem[],
+  dataset: PlanningDataset,
+  productionWindow: DateRange | undefined,
+  now: string,
+  leadTimeOverrideDays: Record<string, number> | undefined,
+  bomByParent: ReadonlyMap<string, BomRow[]>
+): void {
+  const productionStart = productionWindow?.start;
+  if (!productionStart) return;
+  const leadTimes = leadTimeStats(dataset);
+
+  for (const candidate of candidates) {
+    if (candidate.derivation === "none") continue;
+    const lines: (BomRow | InferredBomLine)[] =
+      bomByParent.get(candidate.itemId) ?? blendAnalogueBoms(candidate.analogues, bomByParent);
+
+    let longest: { line: BomRow | InferredBomLine; days: number } | undefined;
+    for (const line of lines) {
+      const days = leadTimeOverrideDays?.[line.componentId] ?? leadTimes.get(line.componentId)?.days;
+      if (days === undefined) continue;
+      if (!longest || days > longest.days) longest = { line, days };
+    }
+    if (!longest) continue;
+
+    const date = addDays(productionStart, -longest.days);
+    candidate.deadline = {
+      date,
+      weeksAway: weeksBetween(now, date),
+      componentId: longest.line.componentId,
+      componentName: longest.line.componentName,
+      componentType: longest.line.componentType,
+      leadTimeDays: longest.days,
+    };
+  }
+}
+
 export interface LeadTimeStat {
   days: number;
   basis: "system" | "historical_median" | "historical_p80";
@@ -1060,10 +1200,11 @@ function buildRunway(
     });
   }
 
-  // The capacity decision is the start of the first month that breaches target
-  // — after that the hours are already being consumed.
+  // The capacity decision is the start of the first month this programme's
+  // load helps push past target — after that the hours are already being
+  // consumed. The same breach Decisions lists as "Resolve load on …".
   const breach = [...capacity.cells]
-    .filter((c) => c.effectiveUtilization > c.targetUtilizationPct)
+    .filter(breachesTarget)
     .sort((a, b) => a.period.localeCompare(b.period))[0];
   if (breach) {
     const date = `${breach.period}-01`;

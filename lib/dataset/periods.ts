@@ -154,7 +154,18 @@ export function shiftYears(range: DateRange, years: number): DateRange {
 function shiftYear(isoDate: string, years: number): string {
   const year = Number(isoDate.slice(0, 4));
   if (!Number.isFinite(year)) return isoDate;
-  return `${year + years}${isoDate.slice(4)}`;
+  const target = year + years;
+  // 29 February has no counterpart in a common year. It maps to the 28th —
+  // still the last day of February, and still inside the same month, so the
+  // season's month weights do not shift.
+  if (isoDate.slice(4, 10) === "-02-29" && !isLeapYear(target)) {
+    return `${target}-02-28${isoDate.slice(10)}`;
+  }
+  return `${target}${isoDate.slice(4)}`;
+}
+
+function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
 }
 
 export function formatMonthLabel(month: MonthKey): string {

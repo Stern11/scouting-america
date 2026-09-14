@@ -14,6 +14,7 @@ import type {
   PlanningDataset,
 } from "@/types/dataset";
 import type { PlanningSituation } from "@/types/situation";
+import { generateDemoDataset } from "@/lib/dataset/demo/generate";
 
 /* ------------------------------------------------------------------ */
 /* Fixture helpers                                                     */
@@ -33,7 +34,7 @@ function meta(planningNow: string, currency = "USD"): DatasetMetadata {
       materials: true,
       leadTimeAnalysis: true,
       netRequirements: true,
-      readinessHistory: false,
+      readinessHistory: false, lineHistory: false,
     },
   };
 }
@@ -59,7 +60,7 @@ function makeDataset(partial: {
     itemLineMappings: partial.itemLineMappings ?? [],
     leadTimeHistory: partial.leadTimeHistory ?? [],
     inventorySupply: partial.inventorySupply ?? [],
-    readinessHistory: [],
+    readinessHistory: [], lineHistory: [],
   };
 }
 
@@ -1531,7 +1532,7 @@ describe("a scenario volume override moves every downstream number together", ()
     const carry = baseline.candidateItems.find((c) => c.itemId === "item_2026_a")!;
 
     const overridden = firstSituation(ds, {
-      volumeOverrideUnits: { [carry.id]: carry.plannedUnits * 2 },
+      volumeOverridesBySituation: { [baseline.id]: { [carry.id]: carry.plannedUnits * 2 } },
     });
 
     const extra = carry.plannedUnits;
@@ -1552,8 +1553,11 @@ describe("a scenario volume override moves every downstream number together", ()
 
   it("leaves the historical actual untouched — an override is a plan, not a rewrite", () => {
     const ds = buildCoreDataset();
-    const carry = firstSituation(ds).candidateItems.find((c) => c.itemId === "item_2026_a")!;
-    const overridden = firstSituation(ds, { volumeOverrideUnits: { [carry.id]: 999_999 } });
+    const baseline = firstSituation(ds);
+    const carry = baseline.candidateItems.find((c) => c.itemId === "item_2026_a")!;
+    const overridden = firstSituation(ds, {
+      volumeOverridesBySituation: { [baseline.id]: { [carry.id]: 999_999 } },
+    });
     const after = overridden.candidateItems.find((c) => c.itemId === "item_2026_a")!;
 
     expect(after.plannedUnits).toBe(999_999);
@@ -1566,9 +1570,91 @@ describe("a scenario volume override moves every downstream number together", ()
     const baseline = firstSituation(ds);
     const carry = baseline.candidateItems.find((c) => c.itemId === "item_2026_a")!;
     const other = baseline.candidateItems.find((c) => c.itemId === "item_2026_b")!;
-    const overridden = firstSituation(ds, { volumeOverrideUnits: { [carry.id]: 1 } });
+    const overridden = firstSituation(ds, {
+      volumeOverridesBySituation: { [baseline.id]: { [carry.id]: 1 } },
+    });
 
     const otherAfter = overridden.candidateItems.find((c) => c.itemId === "item_2026_b")!;
     expect(otherAfter.plannedUnits).toBe(other.plannedUnits);
+  });
+});
+
+describe("planner decisions stay inside the programme they were made in", () => {
+  const ds = generateDemoDataset({ planningNow: "2027-03-08T09:00:00.000Z" });
+  const baseline = buildSituations(ds);
+
+  // A candidate id names a product, and the same product can run in two
+  // programmes — which is exactly when a decision could leak between them.
+  const shared = (() => {
+    const seenIn = new Map<string, string>();
+    for (const s of baseline) {
+      for (const c of s.candidateItems) {
+        const other = seenIn.get(c.id);
+        if (other !== undefined && other !== s.id) return { id: c.id, first: other, second: s.id };
+        seenIn.set(c.id, s.id);
+      }
+    }
+    return undefined;
+  })();
+
+  const unitsIn = (situations: PlanningSituation[], situationId: string, candidateId: string) =>
+    situations.find((s) => s.id === situationId)!.candidateItems.find((c) => c.id === candidateId)!
+      .plannedUnits;
+
+  it("the demo carries at least one product in two programmes", () => {
+    expect(shared).toBeDefined();
+  });
+
+  it("a volume committed in one programme leaves the same product in another untouched", () => {
+    const { id, first, second } = shared!;
+    const after = buildSituations(ds, {
+      overridesBySituation: {
+        [first]: {
+          dispositions: {},
+          commitments: {
+            [id]: {
+              candidateId: id,
+              itemName: "Shared product",
+              units: 12_345,
+              basisUnits: 0,
+              basisLabel: "",
+              committedAt: "2027-03-08T09:00:00.000Z",
+            },
+          },
+        },
+      },
+    });
+    expect(unitsIn(after, first, id)).toBe(12_345);
+    expect(unitsIn(after, second, id)).toBe(unitsIn(baseline, second, id));
+  });
+
+  it("a scenario volume does the same", () => {
+    const { id, first, second } = shared!;
+    const after = buildSituations(ds, { volumeOverridesBySituation: { [first]: { [id]: 54_321 } } });
+    expect(unitsIn(after, first, id)).toBe(54_321);
+    expect(unitsIn(after, second, id)).toBe(unitsIn(baseline, second, id));
+  });
+
+  it("a scenario volume wins over a committed one in the same programme", () => {
+    const { id, first } = shared!;
+    const after = buildSituations(ds, {
+      overridesBySituation: {
+        [first]: {
+          dispositions: {},
+          commitments: {
+            [id]: {
+              candidateId: id,
+              itemName: "Shared product",
+              units: 100,
+              basisUnits: 0,
+              basisLabel: "",
+              committedAt: "2027-03-08T09:00:00.000Z",
+            },
+          },
+        },
+      },
+      volumeOverridesBySituation: { [first]: { [id]: 200 } },
+    });
+    expect(unitsIn(after, first, id)).toBe(200);
   });
 });

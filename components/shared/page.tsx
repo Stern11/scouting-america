@@ -134,9 +134,16 @@ export interface MetricItem {
  */
 export function MetricRow({ items, className }: { items: MetricItem[]; className?: string }) {
   return (
-    <div className={cn("flex flex-wrap items-start gap-x-10 gap-y-5", className)}>
+    // A two-column grid on a phone, so the figures line up in columns instead
+    // of wrapping wherever each one happens to run out of room.
+    <div
+      className={cn(
+        "grid w-full grid-cols-2 items-start gap-x-6 gap-y-5 sm:flex sm:w-auto sm:flex-wrap sm:gap-x-10",
+        className
+      )}
+    >
       {items.map((item, i) => (
-        <div key={i} className="min-w-[110px]">
+        <div key={i} className="min-w-0 sm:min-w-[110px]">
           <Label>{item.label}</Label>
           <div
             className={cn(

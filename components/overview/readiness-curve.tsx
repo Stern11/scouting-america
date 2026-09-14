@@ -1,220 +1,207 @@
 /**
  * The season readiness curve (V2 §39, PRD §16, §23.2 — "Planning Gap Curve").
  *
- * One question per card: for this season, are we ahead of or behind where
- * last year was at this point, how long is left, and what is the one thing
- * that could still keep an unrepresented item from making it?
+ * One question per card: how much of this season's expected value is in the
+ * plan, against where last year stood at the same point — and how much has to
+ * be added before the first decision stops being reversible?
  *
- * Deliberately plain: one reference curve (last year, from real — if
- * synthetic-in-demo — weekly history), and two vertical lines — today and
- * drop-dead — each with its own shaded zone rather than a bare mark, so the
- * three sections ("already elapsed", "runway left", "past the point of no
- * return") read as regions, not as something to infer from a dot. A dot marks
- * every place the reference curve actually crosses one of those lines, and
- * hovering anywhere on the curve holds a read-out of that point's value. The
- * chart is compact on the card by default; an expand button opens the same
- * chart larger, where the same hover is easier to aim. It does not try to
- * also plot this season's own history as a connected line — that series is
- * built independently of the live "today" figure and is not guaranteed to
- * meet it smoothly, which read as a rendering bug rather than a real kink.
+ * Last year is a dashed historical line; this year is a solid line from its
+ * earlier checkpoints to today's live figure, with both marked at today's
+ * week. The span from today to the deadline is the green "weeks left" zone,
+ * from the deadline to production start the red "lead time" zone. One line
+ * underneath reads the lateness gap in points and in money.
+ *
+ * Marks and labels are HTML laid over a stretched SVG, so text and dots keep
+ * their shape at any card width; the SVG only carries lines and zones. Every
+ * figure comes from `buildReadinessCurve`.
  */
 
 "use client";
 
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Maximize2 } from "lucide-react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { weeksBetween } from "@/lib/dataset/periods";
-import { fmtDateShort, fmtPct } from "@/lib/utils/format";
-import type { ReadinessCurve } from "@/lib/situations/readiness-curve";
+import { cn } from "@/lib/utils/cn";
+import { fmtDateShort, fmtMoney, fmtPct } from "@/lib/utils/format";
+import {
+  interpolateReadiness,
+  type ReadinessCurve,
+  type ReadinessLateness,
+  type ReadinessPoint,
+} from "@/lib/situations/readiness-curve";
+import { skuCounts } from "@/lib/situations/horizon";
 import type { PlanningSituation } from "@/types/situation";
 
-const W = 600;
-const H = 150;
-const PAD_L = 4;
-const PAD_R = 4;
-
-type Point = { weeksBeforeProductionStart: number; representedPct: number };
-
-function pathFor(points: Point[], horizonWeeks: number): string {
-  if (points.length === 0) return "";
-  const x = (weeks: number) => PAD_L + ((horizonWeeks - weeks) / horizonWeeks) * (W - PAD_L - PAD_R);
-  const y = (pct: number) => H - Math.max(0, Math.min(1, pct)) * H;
-  return points.map((p, i) => `${i === 0 ? "M" : "L"}${x(p.weeksBeforeProductionStart).toFixed(1)},${y(p.representedPct).toFixed(1)}`).join(" ");
+/** Percent across the axis: the horizon at the left, production start at the right. */
+function xPct(weeks: number, horizonWeeks: number): number {
+  return ((horizonWeeks - weeks) / horizonWeeks) * 100;
 }
 
-/** Linear interpolation along a curve sorted by descending weeks-before. Undefined off both ends of empty data. */
-function interpolate(points: Point[], weeks: number): number | undefined {
-  if (points.length === 0) return undefined;
-  const first = points[0]!;
-  const last = points[points.length - 1]!;
-  if (weeks >= first.weeksBeforeProductionStart) return first.representedPct;
-  if (weeks <= last.weeksBeforeProductionStart) return last.representedPct;
-  for (let i = 0; i < points.length - 1; i++) {
-    const a = points[i]!;
-    const b = points[i + 1]!;
-    if (weeks <= a.weeksBeforeProductionStart && weeks >= b.weeksBeforeProductionStart) {
-      const span = a.weeksBeforeProductionStart - b.weeksBeforeProductionStart;
-      const t = span > 0 ? (a.weeksBeforeProductionStart - weeks) / span : 0;
-      return a.representedPct + (b.representedPct - a.representedPct) * t;
-    }
-  }
-  return undefined;
+function yPct(pct: number): number {
+  return (1 - Math.max(0, Math.min(1, pct))) * 100;
 }
 
-interface Zone {
-  from: number;
-  to: number;
-  fill: string;
-  opacity: number;
-}
-
-const ELAPSED: Pick<Zone, "fill" | "opacity"> = { fill: "var(--surface-sunken)", opacity: 1 };
-const RUNWAY: Pick<Zone, "fill" | "opacity"> = { fill: "var(--risk-positive)", opacity: 0.08 };
-const OVERDUE: Pick<Zone, "fill" | "opacity"> = { fill: "var(--risk-critical)", opacity: 0.08 };
-
-/**
- * Three possible bands, left to right: already elapsed (neutral), runway
- * still open (positive tint), and past drop-dead (critical tint) — only the
- * ones the data actually supports. Mirrors the same token treatment
- * `components/workspace/runway.tsx` already uses for "before today" and "the
- * runway band", so a planner reads the same visual language in both places.
- */
-function zonesFor(todayX: number | undefined, dropDeadX: number | undefined): Zone[] {
-  const zones: Zone[] = [];
-  if (todayX !== undefined) {
-    zones.push({ from: 0, to: todayX, ...ELAPSED });
-    if (dropDeadX !== undefined && dropDeadX >= todayX) {
-      zones.push({ from: todayX, to: dropDeadX, ...RUNWAY });
-      zones.push({ from: dropDeadX, to: W, ...OVERDUE });
-    } else if (dropDeadX !== undefined) {
-      zones.push({ from: todayX, to: W, ...OVERDUE });
-    }
-  } else if (dropDeadX !== undefined) {
-    zones.push({ from: 0, to: dropDeadX, ...RUNWAY });
-    zones.push({ from: dropDeadX, to: W, ...OVERDUE });
-  }
-  return zones;
+function pathFor(points: ReadinessPoint[], horizonWeeks: number): string {
+  return points
+    .map(
+      (p, i) =>
+        `${i === 0 ? "M" : "L"}${xPct(p.weeksBeforeProductionStart, horizonWeeks).toFixed(2)},${yPct(p.representedPct).toFixed(2)}`
+    )
+    .join(" ");
 }
 
 /**
  * The chart itself, reused at two sizes: compact on the card, and larger
- * inside the zoom dialog. The `<svg>`'s internal coordinate space (`W`/`H`)
- * never changes — hover precision comes from the element's actual rendered
- * pixel size, which the dialog gives more of, not from a different viewBox.
+ * inside the zoom dialog.
  */
 function ReadinessChart({ curve, heightClass }: { curve: ReadinessCurve; heightClass: string }) {
-  const svgRef = useRef<SVGSVGElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
   const [hoverWeeks, setHoverWeeks] = useState<number | null>(null);
 
   const horizonWeeks = Math.max(curve.horizonWeeks, 1);
-  const x = (weeks: number) => PAD_L + ((horizonWeeks - weeks) / horizonWeeks) * (W - PAD_L - PAD_R);
-  const y = (pct: number) => H - Math.max(0, Math.min(1, pct)) * H;
+  const x = (weeks: number) => xPct(weeks, horizonWeeks);
 
   const hasToday = curve.todayWeeksBeforeProduction !== undefined && curve.todayPct !== undefined;
   const todayX = hasToday ? x(curve.todayWeeksBeforeProduction!) : undefined;
 
-  const dropDeadWeeks =
-    curve.dropDeadDate && curve.productionStart ? weeksBetween(curve.dropDeadDate, curve.productionStart) : undefined;
-  const showDropDead = dropDeadWeeks !== undefined && dropDeadWeeks >= 0 && dropDeadWeeks <= horizonWeeks;
-  const dropDeadX = showDropDead ? x(dropDeadWeeks!) : undefined;
+  const deadlineWeeks = curve.dropDeadWeeksBeforeProduction;
+  const showDeadline = deadlineWeeks !== undefined && deadlineWeeks >= 0 && deadlineWeeks <= horizonWeeks;
+  const deadlineX = showDeadline ? x(deadlineWeeks!) : undefined;
 
-  const zones = zonesFor(todayX, dropDeadX);
-  const hasCurve = curve.priorSeasonPace.length > 1;
+  const hasPrior = curve.priorSeasonPace.length > 1;
+  const hasCurrent = curve.currentSeasonPace.length > 1;
 
-  // Dots wherever the reference curve actually crosses a zone boundary —
-  // never a bare line and a bare curve left for the reader to reconcile.
-  const todayIntersect = hasCurve && hasToday ? interpolate(curve.priorSeasonPace, curve.todayWeeksBeforeProduction!) : undefined;
-  const dropDeadIntersect = hasCurve && showDropDead ? interpolate(curve.priorSeasonPace, dropDeadWeeks!) : undefined;
-
-  const hoverPct = hoverWeeks !== null && hasCurve ? interpolate(curve.priorSeasonPace, hoverWeeks) : undefined;
-  const hoverX = hoverWeeks !== null ? x(hoverWeeks) : undefined;
+  const hoverPrior = hoverWeeks !== null ? interpolateReadiness(curve.priorSeasonPace, hoverWeeks) : undefined;
+  const hoverCurrent = hoverWeeks !== null ? interpolateReadiness(curve.currentSeasonPace, hoverWeeks) : undefined;
 
   const updateHover = (clientX: number) => {
-    const el = svgRef.current;
+    const el = boxRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
     if (rect.width === 0) return;
-    const svgX = ((clientX - rect.left) / rect.width) * W;
-    const weeks = horizonWeeks - ((svgX - PAD_L) / (W - PAD_L - PAD_R)) * horizonWeeks;
-    setHoverWeeks(Math.max(0, Math.min(horizonWeeks, weeks)));
+    const share = (clientX - rect.left) / rect.width;
+    setHoverWeeks(Math.max(0, Math.min(horizonWeeks, horizonWeeks - share * horizonWeeks)));
   };
-
-  // Tooltip box in the same SVG coordinate space as everything else, so it
-  // never drifts out of sync with the point it is labelling. Clamped inside
-  // the viewBox so it cannot render half off-card near either edge.
-  const tooltipW = 108;
-  const tooltipH = 30;
-  const tooltipX = hoverX !== undefined ? Math.max(2, Math.min(W - tooltipW - 2, hoverX - tooltipW / 2)) : 0;
-  const tooltipY = hoverPct !== undefined ? Math.max(2, y(hoverPct) - tooltipH - 8) : 0;
 
   return (
     <div>
-      <div className="relative mt-2">
-        {/* Y-axis: three labelled gridlines. Without a scale, a filled area
-            has no numeric meaning — it just looks like a shape. */}
-        <div className="pointer-events-none absolute inset-y-0 left-0 flex w-7 flex-col justify-between py-0 text-[9px] text-[var(--text-muted)]">
+      <div className="mt-2 pl-7 text-[10px] text-[var(--text-muted)]">% of expected value in plan</div>
+      <div className="relative mt-1 pl-7">
+        {/* Y-axis: three labelled gridlines. */}
+        <div className="pointer-events-none absolute inset-y-0 left-0 flex w-7 flex-col justify-between text-[9px] leading-none text-[var(--text-muted)]">
           <span>100%</span>
           <span>50%</span>
           <span>0%</span>
         </div>
 
-        <svg
-          ref={svgRef}
-          viewBox={`0 0 ${W} ${H}`}
-          className={`${heightClass} w-full cursor-crosshair pl-7`}
-          preserveAspectRatio="none"
+        <div
+          ref={boxRef}
+          className={cn("@container relative w-full cursor-crosshair", heightClass)}
           onMouseMove={(e) => updateHover(e.clientX)}
           onMouseLeave={() => setHoverWeeks(null)}
         >
-          {/* Shaded sections first, so every line drawn afterwards sits on top. */}
-          {zones.map((z, i) => (
-            <rect key={i} x={z.from} y={0} width={Math.max(0, z.to - z.from)} height={H} fill={z.fill} fillOpacity={z.opacity} />
-          ))}
+          <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 size-full" aria-hidden>
+            {todayX !== undefined ? (
+              <rect x={0} y={0} width={todayX} height={100} fill="var(--surface-sunken)" />
+            ) : null}
+            {todayX !== undefined && deadlineX !== undefined && deadlineX > todayX ? (
+              <rect x={todayX} y={0} width={deadlineX - todayX} height={100} fill="var(--risk-positive)" fillOpacity={0.09} />
+            ) : null}
+            {deadlineX !== undefined ? (
+              <rect
+                x={Math.max(deadlineX, todayX ?? 0)}
+                y={0}
+                width={100 - Math.max(deadlineX, todayX ?? 0)}
+                height={100}
+                fill="var(--risk-critical)"
+                fillOpacity={0.08}
+              />
+            ) : null}
 
-          {[0, 0.5, 1].map((p) => (
-            <line key={p} x1={0} x2={W} y1={y(p)} y2={y(p)} stroke="var(--border)" strokeWidth={1} />
-          ))}
+            {[0, 50, 100].map((p) => (
+              <line key={p} x1={0} x2={100} y1={p} y2={p} stroke="var(--border)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+            ))}
 
-          {hasCurve ? (
-            <path d={pathFor(curve.priorSeasonPace, horizonWeeks)} fill="none" stroke="var(--state-historical)" strokeWidth={1.5} strokeDasharray="4,3" />
+            {hasPrior ? (
+              <path
+                d={pathFor(curve.priorSeasonPace, horizonWeeks)}
+                fill="none"
+                stroke="var(--state-historical)"
+                strokeWidth={1.5}
+                strokeDasharray="4,3"
+                vectorEffect="non-scaling-stroke"
+              />
+            ) : null}
+            {hasCurrent ? (
+              <path
+                d={pathFor(curve.currentSeasonPace, horizonWeeks)}
+                fill="none"
+                stroke="var(--state-formal)"
+                strokeWidth={2}
+                vectorEffect="non-scaling-stroke"
+              />
+            ) : null}
+
+            {deadlineX !== undefined ? (
+              <line x1={deadlineX} x2={deadlineX} y1={0} y2={100} stroke="var(--risk-critical)" strokeDasharray="3,3" strokeWidth={1.25} vectorEffect="non-scaling-stroke" />
+            ) : null}
+            {todayX !== undefined ? (
+              <line x1={todayX} x2={todayX} y1={0} y2={100} stroke="var(--text-primary)" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+            ) : null}
+            {hoverWeeks !== null ? (
+              <line x1={x(hoverWeeks)} x2={x(hoverWeeks)} y1={0} y2={100} stroke="var(--text-muted)" strokeDasharray="2,2" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+            ) : null}
+          </svg>
+
+          {/* Zone labels, at the top of each zone. */}
+          {todayX !== undefined && deadlineX !== undefined && curve.weeksLeft !== undefined && deadlineX > todayX ? (
+            <ZoneLabel
+              from={todayX}
+              to={deadlineX}
+              className="text-[var(--risk-positive)]"
+              short={`${curve.weeksLeft} wks left`}
+            >
+              {curve.weeksLeft} wks left
+            </ZoneLabel>
+          ) : null}
+          {deadlineX !== undefined && curve.leadTimeWeeks !== undefined ? (
+            <ZoneLabel
+              from={Math.max(deadlineX, todayX ?? 0)}
+              to={100}
+              className="text-[var(--risk-critical)]"
+              short={`${curve.leadTimeWeeks}w lead`}
+            >
+              {curve.leadTimeWeeks} wks lead time
+            </ZoneLabel>
           ) : null}
 
-          {showDropDead ? (
-            <line x1={dropDeadX} x2={dropDeadX} y1={0} y2={H} stroke="var(--risk-critical)" strokeDasharray="3,3" strokeWidth={1.25} />
+          {/* Marks at today's week: last year, and this year. */}
+          {todayX !== undefined && curve.lastYearAtToday !== undefined ? (
+            <Dot x={todayX} y={yPct(curve.lastYearAtToday)} color="var(--state-historical)" />
+          ) : null}
+          {deadlineX !== undefined && curve.lastYearAtDeadline !== undefined ? (
+            <Dot x={deadlineX} y={yPct(curve.lastYearAtDeadline)} color="var(--state-historical)" />
+          ) : null}
+          {todayX !== undefined && hasToday ? (
+            <Dot x={todayX} y={yPct(curve.todayPct!)} color="var(--state-formal)" size="lg" />
           ) : null}
 
-          {hasToday ? (
-            <line x1={todayX} x2={todayX} y1={0} y2={H} stroke="var(--text-primary)" strokeWidth={1.5} />
+          {hoverWeeks !== null && (hoverPrior !== undefined || hoverCurrent !== undefined) ? (
+            <div
+              className="pointer-events-none absolute top-1 z-10 -translate-x-1/2 whitespace-nowrap rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-elevated)] px-2 py-1 text-[10.5px] leading-tight tabular-nums shadow-sm"
+              style={{ left: `${Math.max(14, Math.min(86, x(hoverWeeks)))}%` }}
+            >
+              <div className="text-[var(--text-muted)]">{Math.round(hoverWeeks)} wks before</div>
+              {hoverCurrent !== undefined ? (
+                <div className="font-semibold text-[var(--text-primary)]">{fmtPct(hoverCurrent)} this year</div>
+              ) : null}
+              {hoverPrior !== undefined ? (
+                <div className="text-[var(--text-secondary)]">{fmtPct(hoverPrior)} last year</div>
+              ) : null}
+            </div>
           ) : null}
-
-          {/* Where the reference curve actually crosses a zone boundary. */}
-          {todayIntersect !== undefined ? (
-            <circle cx={todayX} cy={y(todayIntersect)} r={3} fill="var(--state-historical)" stroke="var(--surface)" strokeWidth={1.25} />
-          ) : null}
-          {dropDeadIntersect !== undefined ? (
-            <circle cx={dropDeadX} cy={y(dropDeadIntersect)} r={3} fill="var(--state-historical)" stroke="var(--surface)" strokeWidth={1.25} />
-          ) : null}
-
-          {/* Hover read-out: a guideline, a dot on the curve, and a value that
-              holds in place for as long as the pointer stays over the chart. */}
-          {hoverX !== undefined ? (
-            <line x1={hoverX} x2={hoverX} y1={0} y2={H} stroke="var(--text-muted)" strokeWidth={1} strokeDasharray="2,2" />
-          ) : null}
-          {hoverX !== undefined && hoverPct !== undefined ? (
-            <>
-              <circle cx={hoverX} cy={y(hoverPct)} r={3.5} fill="var(--state-historical)" stroke="var(--surface)" strokeWidth={1.5} />
-              <rect x={tooltipX} y={tooltipY} width={tooltipW} height={tooltipH} rx={4} fill="var(--surface-elevated)" stroke="var(--border)" strokeWidth={1} />
-              <text x={tooltipX + tooltipW / 2} y={tooltipY + 13} textAnchor="middle" fontSize={10.5} fill="var(--text-muted)">
-                {Math.round(hoverWeeks!)} wks before
-              </text>
-              <text x={tooltipX + tooltipW / 2} y={tooltipY + 25} textAnchor="middle" fontSize={12} fontWeight={600} fill="var(--text-primary)">
-                {fmtPct(hoverPct)} last year
-              </text>
-            </>
-          ) : null}
-        </svg>
+        </div>
       </div>
 
       <div className="flex items-center justify-between pl-7 text-[10.5px] text-[var(--text-muted)]">
@@ -222,34 +209,119 @@ function ReadinessChart({ curve, heightClass }: { curve: ReadinessCurve; heightC
         <span>production start</span>
       </div>
 
-      {/* Every mark on the chart, named — nothing left for the reader to guess. */}
       <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 pl-7 text-[10.5px] text-[var(--text-muted)]">
-        {hasToday ? (
+        {hasCurrent || hasToday ? (
           <span className="flex items-center gap-1.5">
-            <span className="h-3 w-px bg-[var(--text-primary)]" aria-hidden />
-            Today
+            <span className="h-0.5 w-3 bg-[var(--state-formal)]" aria-hidden />
+            This year
           </span>
         ) : null}
-        {hasCurve ? (
+        {hasPrior ? (
           <span className="flex items-center gap-1.5">
             <span className="h-px w-3 border-t border-dashed border-[var(--state-historical)]" aria-hidden />
-            Last year, same point — hover for values
+            Last year
           </span>
         ) : null}
-        {showDropDead ? (
+        {showDeadline ? (
           <span className="flex items-center gap-1.5">
             <span className="h-px w-3 border-t border-dashed border-[var(--risk-critical)]" aria-hidden />
-            Drop-dead{curve.dropDeadDate ? ` · ${fmtDateShort(curve.dropDeadDate)}` : ""}
-          </span>
-        ) : null}
-        {showDropDead && hasToday ? (
-          <span className="flex items-center gap-1.5">
-            <span className="size-2 rounded-[2px] bg-[var(--risk-positive)] opacity-35" aria-hidden />
-            Runway left
+            {curve.dropDeadLabel ?? "Deadline"}
+            {curve.dropDeadDate ? ` · ${fmtDateShort(curve.dropDeadDate)}` : ""}
           </span>
         ) : null}
       </div>
     </div>
+  );
+}
+
+function ZoneLabel({
+  from,
+  to,
+  className,
+  short,
+  children,
+}: {
+  from: number;
+  to: number;
+  className: string;
+  /** What fits when the chart is phone-width — "11w" rather than a clipped "11 wks l…". */
+  short: ReactNode;
+  children: ReactNode;
+}) {
+  const share = to - from;
+  // Too narrow even for the short form: the legend and the lateness line still carry it.
+  if (share < 10) return null;
+  // The full words need about 90px: a fifth of a card-width chart, never a
+  // phone-width one.
+  const fullFits = share >= 20;
+  return (
+    <div
+      className={cn(
+        "pointer-events-none absolute bottom-1 truncate px-0.5 text-center text-[10px] font-medium",
+        className
+      )}
+      style={{ left: `${from}%`, width: `${share}%` }}
+    >
+      {fullFits ? (
+        <>
+          <span className="@[440px]:hidden">{short}</span>
+          <span className="hidden @[440px]:inline">{children}</span>
+        </>
+      ) : (
+        short
+      )}
+    </div>
+  );
+}
+
+function Dot({ x, y, color, size = "sm" }: { x: number; y: number; color: string; size?: "sm" | "lg" }) {
+  return (
+    <span
+      className={cn(
+        "pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 rounded-full border-[1.5px] border-[var(--surface)]",
+        size === "lg" ? "size-2.5" : "size-2"
+      )}
+      style={{ left: `${x}%`, top: `${y}%`, background: color }}
+      aria-hidden
+    />
+  );
+}
+
+/** "12 pts behind last year · needs +29 pts ($48M) in 10 wks — last year gained 17 pts". */
+function LatenessLine({ lateness }: { lateness: ReadinessLateness }) {
+  const pts = (n: number) => Math.round(Math.abs(n) * 100);
+  const { gapPts, neededPts, neededValue, lastYearGainedPts, weeksLeft, currency } = lateness;
+
+  return (
+    <p className="mt-2 text-[11.5px] leading-snug tabular-nums text-[var(--text-secondary)]">
+      {gapPts !== undefined ? (
+        pts(gapPts) === 0 ? (
+          <span className="font-medium text-[var(--text-primary)]">Level with last year</span>
+        ) : (
+          <span
+            className={cn(
+              "font-medium",
+              gapPts < 0 ? "text-[var(--risk-critical)]" : "text-[var(--risk-positive)]"
+            )}
+          >
+            {pts(gapPts)} pts {gapPts < 0 ? "behind" : "ahead of"} last year
+          </span>
+        )
+      ) : null}
+      {gapPts !== undefined && neededPts !== undefined ? " · " : null}
+      {neededPts !== undefined ? (
+        neededPts > 0 ? (
+          <>
+            needs <span className="font-medium text-[var(--text-primary)]">+{pts(neededPts)} pts</span>
+            {neededValue !== undefined ? ` (${fmtMoney(neededValue, currency)})` : ""}
+            {weeksLeft !== undefined ? ` in ${weeksLeft} wks` : ""}
+            {lastYearGainedPts !== undefined ? ` — last year gained ${pts(lastYearGainedPts)} pts` : ""}
+          </>
+        ) : (
+          "already past last year's level at the deadline"
+        )
+      ) : null}
+    </p>
   );
 }
 
@@ -259,9 +331,7 @@ export function ReadinessCurveCard({
   href,
 }: {
   curve: ReadinessCurve;
-  /** For the one-line count of what's still unrepresented/undecided — kept as
-   *  a light passthrough rather than duplicated onto `ReadinessCurve` itself,
-   *  since it is already computed identically wherever a situation is listed. */
+  /** For the one-line count of what's still unrepresented/undecided. */
   situation: PlanningSituation;
   href: string;
 }) {
@@ -269,11 +339,8 @@ export function ReadinessCurveCard({
   const router = useRouter();
 
   return (
-    // A `<button>` inside an `<a>` is invalid HTML and makes the two capture
-    // each other's clicks unpredictably, so the whole card navigates via
-    // `router.push` on its own click handler instead of wrapping it in a
-    // real link — the zoom button just has to stop that click from
-    // reaching this one, the same as it would with a nested anchor.
+    // A `<button>` inside an `<a>` is invalid HTML, so the card navigates on
+    // its own click handler and the zoom button stops propagation.
     <div
       role="link"
       tabIndex={0}
@@ -292,14 +359,9 @@ export function ReadinessCurveCard({
               today <span className="font-medium text-[var(--text-primary)] tabular-nums">{fmtPct(curve.todayPct)}</span>
             </span>
           ) : null}
-          {curve.runwayWeeks !== undefined ? (
+          {curve.lastYearAtToday !== undefined ? (
             <span>
-              runway{" "}
-              <span
-                className={curve.runwayWeeks <= 8 ? "font-medium text-[var(--risk-critical)] tabular-nums" : "font-medium text-[var(--text-primary)] tabular-nums"}
-              >
-                {curve.runwayWeeks}w
-              </span>
+              last year <span className="font-medium text-[var(--text-secondary)] tabular-nums">{fmtPct(curve.lastYearAtToday)}</span>
             </span>
           ) : null}
           <button
@@ -310,7 +372,7 @@ export function ReadinessCurveCard({
             }}
             title="Expand chart"
             aria-label="Expand chart"
-            className="flex-none rounded-[var(--radius-sm)] p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--interaction-hover)] hover:text-[var(--text-primary)]"
+            className="-my-1.5 grid size-8 flex-none place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] transition-colors hover:bg-[var(--interaction-hover)] hover:text-[var(--text-primary)]"
             style={{ transitionDuration: "var(--duration-fast)" }}
           >
             <Maximize2 className="size-3.5" />
@@ -320,13 +382,19 @@ export function ReadinessCurveCard({
 
       <div className="text-[11px] leading-snug text-[var(--text-muted)]">{metaLine(situation)}</div>
 
-      <ReadinessChart curve={curve} heightClass="h-[92px]" />
+      <ReadinessChart curve={curve} heightClass="h-[96px]" />
 
       {!curve.historyAvailable ? (
         <p className="mt-2 text-[11px] text-[var(--text-muted)]">{curve.historyUnavailableReason}</p>
       ) : curve.priorSeasonPace.length === 0 ? (
         <p className="mt-2 text-[11px] text-[var(--text-muted)]">No comparable prior season to pace against.</p>
-      ) : null}
+      ) : curve.lateness ? (
+        <LatenessLine lateness={curve.lateness} />
+      ) : (
+        <p className="mt-2 text-[11px] text-[var(--text-muted)]">
+          Today and the deadline fall outside last year&apos;s history, so there is no gap to read.
+        </p>
+      )}
 
       {curve.constrainingMaterial ? (
         <p className="mt-2.5 border-t border-[var(--border)] pt-2 text-[11.5px] leading-snug text-[var(--text-secondary)]">
@@ -337,25 +405,28 @@ export function ReadinessCurveCard({
         </p>
       ) : null}
 
-      <Dialog open={zoomed} onOpenChange={setZoomed}>
-        <DialogContent className="max-w-3xl">
-          <DialogTitle>{curve.situationTitle}</DialogTitle>
-          <div className="text-[11px] leading-snug text-[var(--text-muted)]">{metaLine(situation)}</div>
-          <ReadinessChart curve={curve} heightClass="h-[300px]" />
-        </DialogContent>
-      </Dialog>
+      {/* React events bubble through the dialog's portal to the card; stop
+          them here so closing or clicking inside the dialog never navigates. */}
+      <div onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+        <Dialog open={zoomed} onOpenChange={setZoomed}>
+          <DialogContent className="max-w-3xl">
+            <DialogTitle>{curve.situationTitle}</DialogTitle>
+            <div className="text-[11px] leading-snug text-[var(--text-muted)]">{metaLine(situation)}</div>
+            <ReadinessChart curve={curve} heightClass="h-[300px]" />
+            {curve.lateness ? <LatenessLine lateness={curve.lateness} /> : null}
+          </DialogContent>
+        </Dialog>
+      </div>
     </div>
   );
 }
 
 function metaLine(situation: PlanningSituation): string {
-  const unrepresented = situation.candidateItems.filter((c) => c.match.matchedItemId === undefined).length;
-  const undecided = situation.candidateItems.filter(
-    (c) => c.disposition === "unreviewed" || c.disposition === "under_review"
-  ).length;
+  // The same counts as the Overview headline and Reconcile (`skuCounts`).
+  const { missing, toDecide } = skuCounts(situation);
   const parts = [
-    `${unrepresented} product${unrepresented === 1 ? "" : "s"} unrepresented`,
-    undecided > 0 ? `${undecided} still to decide` : undefined,
+    `${missing} product${missing === 1 ? "" : "s"} missing`,
+    toDecide > 0 ? `${toDecide} still to decide` : undefined,
     situation.productionWindow ? `builds from ${fmtDateShort(situation.productionWindow.start)}` : undefined,
   ].filter((p): p is string => Boolean(p));
   return parts.join(" · ");

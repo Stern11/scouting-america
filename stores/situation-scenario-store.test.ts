@@ -1,5 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createMemoryStorage } from "./memory-storage";
+import { setStorageNamespace } from "@/lib/utils/storage-scope";
 
 const localStore = createMemoryStorage();
 
@@ -10,9 +11,11 @@ beforeAll(() => {
     configurable: true,
     writable: true,
   });
+  // Planning keys are scoped to an account; nothing persists until one is bound.
+  setStorageNamespace("test-account");
 });
 
-const { useSituationScenarioStore, SITUATION_SCENARIO_STORAGE_KEY } = await import(
+const { useSituationScenarioStore, SITUATION_SCENARIO_STORAGE_KEY, isScenarioDirty } = await import(
   "./situation-scenario-store"
 );
 const { countAdjustments } = await import("@/lib/situations/scenario");
@@ -131,17 +134,69 @@ describe("adjustments", () => {
   });
 });
 
+describe("save and discard", () => {
+  it("a new scenario is clean; an edit makes it dirty; saving makes it clean", () => {
+    const id = store().createScenario("halloween", "A", NOW);
+    expect(isScenarioDirty(store().scenarios[id])).toBe(false);
+    store().setVolumeUnits(id, "cand-1", 86);
+    expect(isScenarioDirty(store().scenarios[id])).toBe(true);
+    store().saveScenario(id);
+    expect(isScenarioDirty(store().scenarios[id])).toBe(false);
+  });
+
+  it("discarding restores the saved snapshot", () => {
+    const id = store().createScenario("halloween", "A", NOW);
+    store().setVolumeUnits(id, "cand-1", 120);
+    store().saveScenario(id);
+    store().setVolumeUnits(id, "cand-1", 86);
+    store().setVolumeUnits(id, "cand-2", 10);
+    store().discardChanges(id);
+    expect(store().scenarios[id]!.adjustments.volumeUnits).toEqual({ "cand-1": 120 });
+    expect(isScenarioDirty(store().scenarios[id])).toBe(false);
+  });
+
+  it("clearing an edit back to the saved value is clean again", () => {
+    const id = store().createScenario("halloween", "A", NOW);
+    store().setVolumeUnits(id, "cand-1", 86);
+    store().clearAdjustment(id, "volumeUnits", "cand-1");
+    expect(isScenarioDirty(store().scenarios[id])).toBe(false);
+  });
+
+  it("migrates older scenarios with their current adjustments treated as saved", async () => {
+    const migrate = useSituationScenarioStore.persist.getOptions().migrate!;
+    const migrated = (await migrate(
+      {
+        scenarios: {
+          scn_1: {
+            id: "scn_1",
+            name: "Old",
+            situationId: "halloween",
+            adjustments: { availableHours: {}, targetUtilization: {}, runRate: {}, allocation: {}, leadTimeDays: { "MAT-FILM": 81 } },
+            createdAt: NOW,
+            updatedAt: NOW,
+          },
+        },
+      },
+      2
+    )) as { scenarios: Record<string, Parameters<typeof isScenarioDirty>[0] & object> };
+    const scenario = migrated.scenarios.scn_1!;
+    expect(scenario.adjustments.volumeUnits).toEqual({});
+    expect(scenario.savedAdjustments.leadTimeDays["MAT-FILM"]).toBe(81);
+    expect(isScenarioDirty(scenario)).toBe(false);
+  });
+});
+
 describe("persistence", () => {
   it("stores overrides only — never a derived planning number", () => {
     const id = store().createScenario("halloween", "A", NOW);
     store().setAvailableHours(id, "LINE-03", "2027-06", 720);
 
-    const parsed = JSON.parse(localStore.getItem(SITUATION_SCENARIO_STORAGE_KEY)!) as {
+    const parsed = JSON.parse(localStore.getItem(`${SITUATION_SCENARIO_STORAGE_KEY}:test-account`)!) as {
       state: { scenarios: Record<string, Record<string, unknown>> };
     };
     const stored = parsed.state.scenarios[id]!;
     expect(Object.keys(stored).sort()).toEqual(
-      ["adjustments", "createdAt", "id", "name", "situationId", "updatedAt"].sort()
+      ["adjustments", "createdAt", "id", "name", "savedAdjustments", "situationId", "updatedAt"].sort()
     );
   });
 });

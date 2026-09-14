@@ -21,6 +21,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { DISPOSITION_ORDER, dispositionLabel } from "@/components/shared/state-badge";
 import { LineLoadChart, MaterialClockChart } from "@/components/workspace/sku-charts";
 import { Label } from "@/components/shared/page";
+import { blendShares } from "@/lib/situations/analogues";
 import { matchExplanation, skuImpact, type SkuImpact } from "@/lib/situations/sku-impact";
 import { cn } from "@/lib/utils/cn";
 import { fmtHours, fmtMoney, fmtUnits } from "@/lib/utils/format";
@@ -433,15 +434,13 @@ function AnalogueBasis({
     );
   }
 
-  const included = candidate.analogues.filter((a) => !a.excluded && a.weight > 0);
-  const totalWeight = included.reduce((sum, a) => sum + a.weight, 0);
+  const shares = blendShares(candidate.analogues);
 
   return (
     <div>
       <p className="mb-3 text-[12.5px] leading-relaxed text-[var(--text-secondary)]">
-        This item has no specification yet, so its components are read from comparable products.
-        Everything below is an estimate, and the confidence column says how much of the blend
-        actually carries each one.
+        Components are read from comparable products, weighted toward the closest and most recent.
+        Everything below is an estimate.
       </p>
 
       <div className="flex flex-col gap-1.5">
@@ -459,8 +458,8 @@ function AnalogueBasis({
                 <span className="ml-2 font-normal text-[var(--text-muted)]">{analogue.period}</span>
               </span>
               <span className="flex-none text-[12px] tabular-nums text-[var(--text-secondary)]">
-                {totalWeight > 0 && !analogue.excluded
-                  ? `${Math.round((analogue.weight / totalWeight) * 100)}% of the blend`
+                {shares.has(analogue.candidateId)
+                  ? `${Math.round((shares.get(analogue.candidateId) ?? 0) * 100)}% of the blend`
                   : "excluded"}
               </span>
             </div>
@@ -498,11 +497,12 @@ function AnalogueBasis({
 
 function SectionTitle({ children, aside }: { children: React.ReactNode; aside?: string }) {
   return (
-    <div className="mb-2 flex items-baseline justify-between gap-3">
-      <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">
+    // Each part stays on one line; the aside drops below whole when both do not fit.
+    <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+      <span className="whitespace-nowrap text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">
         {children}
       </span>
-      {aside ? <span className="text-[11.5px] text-[var(--text-muted)]">{aside}</span> : null}
+      {aside ? <span className="whitespace-nowrap text-[11.5px] text-[var(--text-muted)]">{aside}</span> : null}
     </div>
   );
 }

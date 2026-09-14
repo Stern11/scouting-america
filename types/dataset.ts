@@ -62,6 +62,8 @@ export interface DatasetCapabilities {
   netRequirements: boolean;
   /** Readiness_History present — enables the season readiness curve's "last year's pace" line. */
   readinessHistory: boolean;
+  /** Line_History present — enables line-level downtime, overtime and late-arrival history. */
+  lineHistory: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -260,6 +262,16 @@ export interface LeadTimeHistoryRow {
   specificationFamily?: string;
   plant?: string;
   systemLeadTimeDays?: number;
+  /**
+   * The delivery date the supplier committed to. With it, a receipt can be
+   * judged on time; without it, on-time delivery is not calculated at all.
+   */
+  promisedDate?: string;
+  /**
+   * Quantity actually received against `quantity` ordered. With it, a receipt
+   * can be judged in full; without it, in-full is not calculated at all.
+   */
+  receivedQuantity?: number;
   /** Derived: receiptDate - poDate in whole days. Never asked of the planner. */
   actualLeadTimeDays: number;
 }
@@ -284,8 +296,10 @@ export interface InventorySupplyRow {
 /* ------------------------------------------------------------------ */
 
 /**
- * One weekly snapshot of how much of a season's assortment was represented,
- * some number of weeks before that season's production start. Backs the
+ * One weekly snapshot of how much of a season's expected business value was
+ * represented in the formal plan, some number of weeks before that season's
+ * production start. Measured in value rather than item count, because the pace
+ * that matters is revenue at risk, not a count of SKUs. Backs the
  * Overview readiness curve's "today" trajectory and its "last year's pace"
  * comparison (V2 §39). Never fabricated: absent this sheet, the curve says so
  * rather than showing a shape nothing measured.
@@ -295,9 +309,40 @@ export interface ReadinessSnapshotRow {
   /** Program/period key, e.g. "2027-Halloween" — same shape as planning_period. */
   seasonPeriod: PeriodKey;
   weeksBeforeProductionStart: number;
-  /** 0-1. Share of that season's eventual assortment represented at this point. */
+  /** 0-1. Share of that season's expected business value in the formal plan at this point. */
   representedPct: number;
   asOfDate?: string;
+  notes?: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Line_History (optional)                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * What a line actually did in one past month. The capacity planner's check
+ * on `Line_Capacity`: the hours a line is scheduled for are not the hours it
+ * delivers, and the gap is made of downtime, overtime and waiting on
+ * materials that arrived late.
+ */
+export interface LineHistoryRow {
+  id: string;
+  /** `YYYY-MM`, in the past. */
+  period: MonthKey;
+  plant: string;
+  lineId: string;
+  /** Hours the line was scheduled to run. */
+  scheduledHours: number;
+  /** Hours it actually ran. */
+  runHours: number;
+  /** Breakdowns and stoppages nobody planned. */
+  unplannedDowntimeHours?: number;
+  /** Hours worked above the schedule. */
+  overtimeHours?: number;
+  /** Material deliveries that reached the line late. */
+  lateArrivals?: number;
+  /** Line hours lost waiting on those late deliveries. */
+  lateArrivalHoursLost?: number;
   notes?: string;
 }
 
@@ -316,6 +361,7 @@ export interface PlanningDataset {
   leadTimeHistory: LeadTimeHistoryRow[];
   inventorySupply: InventorySupplyRow[];
   readinessHistory: ReadinessSnapshotRow[];
+  lineHistory: LineHistoryRow[];
 }
 
 /**
@@ -334,6 +380,7 @@ export interface RawPlanningInput {
   leadTimeHistory?: RawRow[];
   inventorySupply?: RawRow[];
   readinessHistory?: RawRow[];
+  lineHistory?: RawRow[];
 }
 
 /** One spreadsheet row: header -> cell value, before coercion. */

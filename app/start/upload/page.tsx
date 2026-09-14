@@ -8,7 +8,7 @@
  * browser via `validateWorkbook` — the workbook is never sent anywhere.
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { UploadStepper, type UploadStep } from "@/components/onboarding/upload-stepper";
@@ -21,7 +21,7 @@ import { validateWorkbook, type WorkbookValidation } from "@/lib/excel/validate"
 import type { ColumnResolution, MappingPlan } from "@/lib/excel/column-mapping";
 import type { SheetName } from "@/lib/dataset/issues";
 import { sheetSpec } from "@/lib/excel/schema";
-import { saveUploadedDataset, persistenceAvailable } from "@/lib/dataset/storage";
+import { probePersistence, saveUploadedDataset } from "@/lib/dataset/storage";
 import { useDatasetStore } from "@/stores/dataset-store";
 
 const STEPS: UploadStep[] = [
@@ -67,9 +67,26 @@ export default function UploadPage() {
   const [manualMapping, setManualMapping] = useState<Map<SheetName, Map<string, string>>>(new Map());
   const [mappingShown, setMappingShown] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Whether this browser keeps a write, tested rather than assumed from the
+  // API existing. Optimistic until the probe answers, so nothing flashes.
+  const [persistOk, setPersistOk] = useState(true);
+  // A save that failed although the probe passed (quota, most often). Shown
+  // before leaving this page rather than discovered after a refresh.
+  const [saveFailed, setSaveFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void probePersistence().then((ok) => {
+      if (!cancelled) setPersistOk(ok);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const resetAll = useCallback(() => {
     setStep(1);
+    setSaveFailed(false);
     setFile(null);
     setFileBuffer(null);
     setDatasetId(null);
@@ -153,10 +170,22 @@ export default function UploadPage() {
   const handleRunPlanning = useCallback(async () => {
     if (!validation?.dataset || !file) return;
     setSaving(true);
-    await saveUploadedDataset(validation.dataset);
-    chooseUpload({ fileName: file.name, uploadedAt: new Date().toISOString(), datasetName });
+    const saved = await saveUploadedDataset(validation.dataset);
+    // The dataset is held for this tab either way, so continuing is safe — but
+    // an unexpected failure is said out loud first, and the next click goes on.
+    if (!saved && persistOk && !saveFailed) {
+      setSaveFailed(true);
+      setSaving(false);
+      return;
+    }
+    chooseUpload({
+      fileName: file.name,
+      uploadedAt: new Date().toISOString(),
+      datasetName,
+      stored: saved,
+    });
     router.push("/overview");
-  }, [validation, file, datasetName, chooseUpload, router]);
+  }, [validation, file, datasetName, chooseUpload, router, persistOk, saveFailed]);
 
   const unreadableMessage =
     validation && !validation.dataset
@@ -237,7 +266,7 @@ export default function UploadPage() {
           {step === 5 && validation?.scope ? (
             <StepScope
               scope={validation.scope}
-              persistenceAvailable={persistenceAvailable()}
+              persistenceAvailable={persistOk && !saveFailed}
               saving={saving}
               onBack={() => setStep(4)}
               onRunPlanning={handleRunPlanning}

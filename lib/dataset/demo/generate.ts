@@ -1008,13 +1008,22 @@ const OLDER_SEASONS: readonly OlderSeason[] = [
 function generateOlderSeasonRows(
   program: Program,
   older: OlderSeason,
-  latestRows: readonly RawRow[]
+  latestRows: readonly RawRow[],
+  specifiedItemIds: ReadonlySet<string>
 ): { rows: RawRow[]; boms: RawRow[] } {
   const rows: RawRow[] = [];
   const boms: RawRow[] = [];
   let seq = 1;
 
   for (const latest of latestRows) {
+    // The unspecified renovation (no bill of materials of its own) is new this
+    // season: it gets no prior-year echo, so it has no row in any earlier
+    // season and is marked new wherever it appears. The sequence still
+    // advances, so every other echo keeps its item id.
+    if (!specifiedItemIds.has(String(latest.item_id))) {
+      seq++;
+      continue;
+    }
     // A dedicated stream per item, so adding the older season does not shift
     // every random draw that follows and silently rewrite the seeded dataset.
     const rng = new Rng(`older::${program.code}::${String(latest.item_id)}`);
@@ -1307,7 +1316,12 @@ function medianOf(values: readonly number[]): number {
   return ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2;
 }
 
-function generateLeadTimeHistory(rng: Rng, planningNow: string): RawRow[] {
+/**
+ * `deliveryRng` is its own stream so that recording what each supplier promised
+ * and delivered does not shift a single lead-time draw — the MAT-FILM
+ * 42d-system / 67d-median story is built from `rng` and must not move.
+ */
+function generateLeadTimeHistory(rng: Rng, deliveryRng: Rng, planningNow: string): RawRow[] {
   const nowMs = Date.parse(planningNow);
   const rows: RawRow[] = [];
   let seq = 1;
@@ -1338,6 +1352,21 @@ function generateLeadTimeHistory(rng: Rng, planningNow: string): RawRow[] {
       const daysBack = rng.int(30, 730);
       const poMs = nowMs - daysBack * 86_400_000;
       const receiptMs = poMs + leadDays * 86_400_000;
+      const quantity = materialQuantity(rng, material.id);
+
+      // What the supplier confirmed at order time: their own usual pace plus a
+      // little cushion — not the system assumption, which is a contract figure
+      // and a different thing (V2 §18.5). A slower supplier confirms later, and
+      // still misses more often, because its spread is wider.
+      const promisedDays = Math.round(profile.mean * supplier.leadTimeFactor + profile.sd * 0.4);
+      const promisedMs = poMs + promisedDays * 86_400_000;
+      // Most receipts arrive in full; a minority are short-shipped. The slower
+      // second sources short-ship a little more often.
+      const shortShipChance = supplier.leadTimeFactor > 1.1 ? 0.2 : 0.1;
+      const receivedQty =
+        deliveryRng.float() < shortShipChance
+          ? Math.round(quantity * deliveryRng.range(0.86, 0.985))
+          : quantity;
 
       rows.push({
         material_id: material.id,
@@ -1345,7 +1374,7 @@ function generateLeadTimeHistory(rng: Rng, planningNow: string): RawRow[] {
         po_id: `PO-${String(700_000 + seq).padStart(6, "0")}`,
         po_date: isoDate(poMs),
         receipt_date: isoDate(receiptMs),
-        quantity: materialQuantity(rng, material.id),
+        quantity,
         uom: material.uom,
         supplier_id: supplier.id,
         supplier_name: supplier.name,
@@ -1353,6 +1382,8 @@ function generateLeadTimeHistory(rng: Rng, planningNow: string): RawRow[] {
         specification_family: SPEC_FAMILY[material.id],
         plant: "PLT-01",
         system_lead_time_days: profile.system,
+        promised_date: isoDate(promisedMs),
+        received_qty: receivedQty,
       });
       seq++;
     }
@@ -1396,27 +1427,24 @@ function generateInventorySupply(rng: Rng, delta: number): RawRow[] {
 /* ------------------------------------------------------------------ */
 
 /** Weeks-before-production-start a real export would plausibly snapshot at. */
-const READINESS_CHECKPOINTS = [44, 38, 32, 26, 20, 14, 8, 4, 0] as const;
+const READINESS_CHECKPOINTS = [52, 44, 38, 32, 26, 20, 14, 8, 4, 0] as const;
 const READINESS_HORIZON_WEEKS = READINESS_CHECKPOINTS[0];
 
-/** Smoothstep — an S-curve from 0 to 1, standing in for "assortment ramps up slowly, then fast, then settles". */
-function sCurve(t: number): number {
-  const clamped = clamp01(t);
-  return clamped * clamped * (3 - 2 * clamped);
-}
-
 /**
- * Weekly-ish snapshots of assortment completeness, for the Overview readiness
- * curve (V2 §39). Two series per programme:
+ * Weekly-ish snapshots of how much of a season's expected *value* was in the
+ * formal plan, for the Overview readiness curve (V2 §39). Two series per
+ * programme:
  *
- * - the prior season, a completed history ramping to ~95-100% by its own
- *   production start — this is what "last year's pace" is read against.
- * - the current season, the *same* shape at a seeded pace factor away from
- *   last year's, but truncated well before "now": the live, actually-computed
- *   representedPct is what stands for today, never a value guessed here. That
- *   is also why this function takes no candidate-matching input at all — it
- *   would have no way to keep a guess consistent with the real figure, so it
- *   does not try.
+ * - the prior season, a completed history closing to ~96-100% by its own
+ *   production start — what "last year's pace" is read against.
+ * - the current season up to a few weeks before today, running a seeded
+ *   number of points behind last year.
+ *
+ * Both are anchored on the one figure the generator already knows today's
+ * live number will land on: the programme's formal share of expected value
+ * (`formalRatioTarget`, which Current_Plan is built to hit). That is what lets
+ * this year's history meet the live "today" point without a seam, rather than
+ * drawing a line that visibly disagrees with the number beside it.
  */
 function generateReadinessHistory(rng: Rng, program: Program, planningNow: string): RawRow[] {
   const rows: RawRow[] = [];
@@ -1425,14 +1453,24 @@ function generateReadinessHistory(rng: Rng, program: Program, planningNow: strin
   const productionStartMs = Date.parse(program.productionWindow.start);
   const weeksBeforeNow = Math.floor((productionStartMs - nowMs) / (7 * 86_400_000));
 
-  const startPct = 0.1 + rng.float() * 0.1; // 10-20% at the earliest checkpoint
-  const historicalFinalPct = 0.95 + rng.float() * 0.05; // last year finished 95-100% represented
-  const paceFactor = 0.75 + rng.float() * 0.35; // this year is 0.75-1.10x last year's pace
+  const finalPrior = 0.96 + rng.float() * 0.04; // last year closed 96-100% represented
+  const behindBy = 0.08 + rng.float() * 0.08; // this year runs 8-16 points behind
+  const today = program.formalRatioTarget;
+  // Last year's position at this same point, capped so it still has room to
+  // close towards its own finish.
+  const priorAtToday = Math.min(finalPrior - 0.02, today + behindBy);
+  const gap = Math.max(0, priorAtToday - today);
+
+  // Completeness closes fastest near the build: g falls from 1 at the horizon
+  // to 0 at production start. Anchored so last year sits at `priorAtToday` in
+  // the week that corresponds to today.
+  const anchorWeeks = Math.min(READINESS_HORIZON_WEEKS, Math.max(1, weeksBeforeNow));
+  const g = (weeks: number) => (weeks / READINESS_HORIZON_WEEKS) ** 1.5;
+  const prior = (weeks: number) =>
+    Math.max(0.03, clamp01(finalPrior - (finalPrior - priorAtToday) * (g(weeks) / g(anchorWeeks))));
 
   for (const weeksBefore of READINESS_CHECKPOINTS) {
-    const t = 1 - weeksBefore / READINESS_HORIZON_WEEKS;
-
-    const historicalPct = clamp01(startPct + (historicalFinalPct - startPct) * sCurve(t));
+    const historicalPct = prior(weeksBefore);
     rows.push({
       season_period: program.historicalPeriod,
       weeks_before_production_start: weeksBefore,
@@ -1441,21 +1479,71 @@ function generateReadinessHistory(rng: Rng, program: Program, planningNow: strin
       notes: "",
     });
 
-    // A snapshot from the future isn't a snapshot — and a synthetic point
-    // sitting right next to the live "today" figure risks a visible seam
-    // where they disagree, so this stops a few weeks short rather than
-    // right up against it.
+    // A snapshot from the future isn't a snapshot, and one right beside the
+    // live figure adds nothing — this stops a few weeks short of today.
     if (weeksBefore <= weeksBeforeNow + 3) continue;
-    const currentPct = clamp01(startPct + (historicalFinalPct - startPct) * sCurve(t) * paceFactor);
     rows.push({
       season_period: program.planningPeriod,
       weeks_before_production_start: weeksBefore,
-      represented_pct: round4(currentPct),
+      represented_pct: round4(Math.max(0.02, historicalPct - gap)),
       as_of_date: isoDate(productionStartMs - weeksBefore * 7 * 86_400_000),
       notes: "",
     });
   }
 
+  return rows;
+}
+
+/* ------------------------------------------------------------------ */
+/* Line_History                                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * How each line tends to lose and gain hours. Line 03, the constrained
+ * high-speed line, breaks down most; Line 04, the flexible alternate, carries
+ * the most overtime; Line 02 fills tins, so it waits on late tin and artwork
+ * deliveries more than the bagging lines do.
+ */
+const LINE_HISTORY_PROFILE: Record<string, { downtime: number; overtime: number; lateArrivals: number }> = {
+  "LINE-01": { downtime: 18, overtime: 12, lateArrivals: 2 },
+  "LINE-02": { downtime: 22, overtime: 16, lateArrivals: 5 },
+  "LINE-03": { downtime: 41, overtime: 20, lateArrivals: 3 },
+  "LINE-04": { downtime: 16, overtime: 34, lateArrivals: 2 },
+};
+
+/** The twelve completed months before the planner's own month. */
+function generateLineHistory(rng: Rng, planningNow: string): RawRow[] {
+  const nowMonth = planningNow.slice(0, 7);
+  const [y, m] = nowMonth.split("-").map(Number) as [number, number];
+  const months: string[] = [];
+  for (let back = 12; back >= 1; back--) {
+    const total = y * 12 + (m - 1) - back;
+    months.push(`${Math.floor(total / 12)}-${String((total % 12) + 1).padStart(2, "0")}`);
+  }
+
+  const rows: RawRow[] = [];
+  for (const line of LINES) {
+    const profile = LINE_HISTORY_PROFILE[line.id] ?? { downtime: 20, overtime: 15, lateArrivals: 2 };
+    for (const period of months) {
+      const scheduled = Math.round(line.baseHours * rng.range(0.84, 0.94));
+      const downtime = Math.round(profile.downtime * rng.range(0.55, 1.5));
+      const overtime = Math.round(profile.overtime * rng.range(0.3, 1.6));
+      const lateArrivals = Math.max(0, Math.round(profile.lateArrivals * rng.range(0.2, 1.8)));
+      const lateHoursLost = Math.round(lateArrivals * rng.range(1.5, 3.5));
+      const run = Math.max(0, scheduled - downtime - lateHoursLost + overtime);
+      rows.push({
+        period,
+        plant: "PLT-01",
+        line_id: line.id,
+        scheduled_hours: scheduled,
+        run_hours: run,
+        unplanned_downtime_hours: downtime,
+        overtime_hours: overtime,
+        late_arrivals: lateArrivals,
+        late_arrival_hours_lost: lateHoursLost,
+      });
+    }
+  }
   return rows;
 }
 
@@ -1497,7 +1585,8 @@ export function generateDemoRawInput(options: DemoDatasetOptions = {}): RawPlann
       const olderOut = generateOlderSeasonRows(
         program,
         shiftOlderSeason(older, yearDelta),
-        out.historicalRows
+        out.historicalRows,
+        new Set(out.bomRows.map((b) => String(b.parent_item_id)))
       );
       historicalItems.push(...olderOut.rows);
       boms.push(...olderOut.boms);
@@ -1516,8 +1605,13 @@ export function generateDemoRawInput(options: DemoDatasetOptions = {}): RawPlann
   // demo narratives that depend on them.
   const lineCapacity = generateLineCapacity(new Rng(`${seed}::line-capacity`), yearDelta, planningNow);
 
-  const leadTimeHistory = generateLeadTimeHistory(new Rng(`${seed}::lead-time`), planningNow);
+  const leadTimeHistory = generateLeadTimeHistory(
+    new Rng(`${seed}::lead-time`),
+    new Rng(`${seed}::deliveries`),
+    planningNow
+  );
   const inventorySupply = generateInventorySupply(new Rng(`${seed}::inventory`), yearDelta);
+  const lineHistory = generateLineHistory(new Rng(`${seed}::line-history`), planningNow);
 
   return {
     metadata: {
@@ -1538,6 +1632,7 @@ export function generateDemoRawInput(options: DemoDatasetOptions = {}): RawPlann
     leadTimeHistory,
     inventorySupply,
     readinessHistory,
+    lineHistory,
   };
 }
 

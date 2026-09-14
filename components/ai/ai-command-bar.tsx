@@ -9,6 +9,7 @@ import { VoiceButton } from "./voice-button";
 import { useDataset } from "@/components/dataset/dataset-provider";
 import { useDatasetStore } from "@/stores/dataset-store";
 import { useSituationScenarioStore } from "@/stores/situation-scenario-store";
+import { useCapacityScenarioStore } from "@/stores/capacity-scenario-store";
 import { respond, type CopilotAction, type CopilotContext, type CopilotReply } from "@/lib/copilot";
 import type { ContributorDisposition } from "@/types/situation";
 
@@ -86,8 +87,14 @@ export function AiCommandBar({
         return;
       }
       case "set_available_hours": {
-        const scenarioId = resolveScenarioId(action.situationId);
-        useSituationScenarioStore.getState().setAvailableHours(scenarioId, action.lineId, action.period, action.hours);
+        // Line hours are plant capacity, not one programme's: they go to the
+        // capacity scenario that Scenario Lab's Capacity planning tab reads.
+        const capacity = useCapacityScenarioStore.getState();
+        const scenarioId =
+          capacity.activeScenarioId && capacity.scenarios[capacity.activeScenarioId]
+            ? capacity.activeScenarioId
+            : capacity.createScenario("AI capacity scenario", new Date().toISOString());
+        useCapacityScenarioStore.getState().setAvailableHours(scenarioId, action.lineId, action.period, action.hours);
         return;
       }
       case "set_lead_time": {

@@ -204,3 +204,21 @@ describe("formatMonthLabel", () => {
     expect(formatMonthLabel("not-a-month")).toBe("not-a-month");
   });
 });
+
+describe("shiftYears — 29 February", () => {
+  it("lands on 28 February in a common year instead of an impossible date", () => {
+    expect(shiftYears({ start: "2024-02-29", end: "2024-03-31" }, 1)).toEqual({
+      start: "2025-02-28",
+      end: "2025-03-31",
+    });
+  });
+
+  it("keeps 29 February when the target year is a leap year", () => {
+    expect(shiftYears({ start: "2024-02-29", end: "2024-02-29" }, 4).start).toBe("2028-02-29");
+  });
+
+  it("treats century years by the Gregorian rule", () => {
+    expect(shiftYears({ start: "2096-02-29", end: "2096-02-29" }, 4).start).toBe("2100-02-28");
+    expect(shiftYears({ start: "1996-02-29", end: "1996-02-29" }, 4).start).toBe("2000-02-29");
+  });
+});

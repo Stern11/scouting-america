@@ -19,19 +19,7 @@
 
 import type { PlanningDataset } from "@/types/dataset";
 import type { MaterialExposureRow, PlanningSituation } from "@/types/situation";
-
-export interface SupplierShare {
-  supplierId: string;
-  supplierName: string;
-  /** Receipts in the sample. */
-  receipts: number;
-  /** Share of sampled quantity, 0-1. */
-  quantityShare: number;
-  /** Median elapsed days for this supplier alone. */
-  medianLeadTimeDays: number;
-  /** The slowest receipt seen from them, which is what a planner plans around. */
-  worstLeadTimeDays: number;
-}
+import { percentile } from "./suppliers";
 
 export interface LeadTimeSample {
   count: number;
@@ -75,7 +63,8 @@ export interface MaterialDetail {
 
   /* --- what it takes to get --- */
   sample?: LeadTimeSample;
-  suppliers: SupplierShare[];
+  // Who supplies it lives in `supplierComparison` (./suppliers.ts), which the
+  // drawer and the release dialog both read, so they cannot disagree.
   leadTimeDays: number;
   leadTimeBasis: MaterialExposureRow["leadTimeBasis"];
   decisionDate: string;
@@ -120,28 +109,6 @@ export function materialDetail(
         }
       : undefined;
 
-  const totalQty = receipts.reduce((sum, r) => sum + r.quantity, 0);
-  const bySupplier = new Map<string, { name: string; qty: number; days: number[] }>();
-  for (const receipt of receipts) {
-    const id = receipt.supplierId ?? receipt.supplierName ?? "unknown";
-    const entry = bySupplier.get(id) ?? { name: receipt.supplierName ?? id, qty: 0, days: [] };
-    entry.qty += receipt.quantity;
-    if (Number.isFinite(receipt.actualLeadTimeDays)) entry.days.push(receipt.actualLeadTimeDays);
-    bySupplier.set(id, entry);
-  }
-
-  const suppliers: SupplierShare[] = [...bySupplier.entries()]
-    .map(([supplierId, entry]) => ({
-      supplierId,
-      supplierName: entry.name,
-      receipts: entry.days.length,
-      quantityShare: totalQty > 0 ? entry.qty / totalQty : 0,
-      medianLeadTimeDays: entry.days.length > 0 ? percentile(entry.days, 0.5) : 0,
-      worstLeadTimeDays: entry.days.length > 0 ? Math.max(...entry.days) : 0,
-    }))
-    .sort((a, b) => b.quantityShare - a.quantityShare)
-    .slice(0, 3);
-
   /* ---- what is already covered ---- */
   const supply = dataset.inventorySupply.filter((r) => r.materialId === materialId);
   // On hand is a position, not a flow — the largest month is what is actually
@@ -177,7 +144,6 @@ export function materialDetail(
     outstandingQty: Math.max(0, row.requirementBase - coveredQty),
 
     sample,
-    suppliers,
     leadTimeDays: row.leadTimeDays,
     leadTimeBasis: row.leadTimeBasis,
     decisionDate: row.decisionDate,
@@ -225,17 +191,4 @@ function priorRequirement(
     found = true;
   }
   return found ? total : undefined;
-}
-
-/** Linear-interpolated percentile of an unsorted sample. */
-function percentile(values: readonly number[], p: number): number {
-  if (values.length === 0) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const index = (sorted.length - 1) * p;
-  const lower = Math.floor(index);
-  const upper = Math.ceil(index);
-  const low = sorted[lower] ?? 0;
-  if (lower === upper) return low;
-  const high = sorted[upper] ?? low;
-  return low + (high - low) * (index - lower);
 }

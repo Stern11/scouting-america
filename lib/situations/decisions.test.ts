@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { generateDemoDataset } from "@/lib/dataset/demo/generate";
 import type { SituationOverrides } from "@/types/situation";
 import { buildSituations } from "./build";
-import { committedLog, pendingDecisions, releaseFor, upcomingDecisions } from "./decisions";
+import { committedLog, nextDecision, pendingDecisions, releaseFor, upcomingDecisions } from "./decisions";
 
 const DATASET = generateDemoDataset({ planningNow: "2027-03-08T09:00:00.000Z" });
 const SITUATIONS = buildSituations(DATASET);
@@ -48,6 +48,46 @@ describe("upcomingDecisions — one calendar across every programme", () => {
   });
 });
 
+describe("decisions follow reconcile actions", () => {
+  it("marking an item carry forward adds its material decisions to upcomingDecisions", () => {
+    const situation = SITUATIONS.find((s) => s.materialExposure.available && s.candidateItems.length > 0);
+    expect(situation).toBeDefined();
+    const s = situation!;
+
+    // Exit everything, so no item bears load and nothing needs ordering.
+    const exitAll = Object.fromEntries(s.candidateItems.map((c) => [c.id, "intentional_exit" as const]));
+    const materialOrders = (overrides: Record<string, SituationOverrides>) => {
+      const rebuilt = buildSituations(DATASET, { overridesBySituation: overrides }).find((x) => x.id === s.id)!;
+      return upcomingDecisions([rebuilt], overrides).filter((d) => d.kind === "material_order");
+    };
+    expect(materialOrders({ [s.id]: { dispositions: exitAll } })).toHaveLength(0);
+
+    // Carry one item forward: its components appear, and name it as the driver.
+    const carried = s.candidateItems.find((c) => {
+      const overrides = { [s.id]: { dispositions: { ...exitAll, [c.id]: "carry_forward" as const } } };
+      return materialOrders(overrides).length > 0;
+    });
+    expect(carried).toBeDefined();
+    const after = materialOrders({ [s.id]: { dispositions: { ...exitAll, [carried!.id]: "carry_forward" } } });
+    expect(after.length).toBeGreaterThan(0);
+    expect(after.every((d) => d.drivenBy.includes(carried!.itemName))).toBe(true);
+    expect(after.every((d) => d.situationId === s.id)).toBe(true);
+  });
+});
+
+describe("nextDecision", () => {
+  it("skips released orders and components stock already covers", () => {
+    const all = upcomingDecisions(SITUATIONS, {});
+    const next = nextDecision(all);
+    expect(next).toBeDefined();
+    expect(next!.released).toBeFalsy();
+    if (next!.materialId && next!.quantity !== undefined) expect(next!.quantity).toBeGreaterThanOrEqual(0.5);
+
+    const released = all.map((d) => (d.key === next!.key ? { ...d, released: true } : d));
+    expect(nextDecision(released)?.key).not.toBe(next!.key);
+  });
+});
+
 describe("releaseFor", () => {
   it("records the component by its own name, with the quantity and date under decision", () => {
     const order = upcomingDecisions(SITUATIONS, {}).find((d) => d.materialId && d.date)!;
@@ -58,10 +98,37 @@ describe("releaseFor", () => {
     expect(release.quantity).toBe(order.quantity ?? 0);
   });
 
+  it("records the supplier awarded, and the row then says who it went to", () => {
+    const order = upcomingDecisions(SITUATIONS, {}).find((d) => d.materialId && d.date)!;
+    const release = releaseFor(order, "2027-03-08T09:00:00.000Z", {
+      supplierId: "SUP-118",
+      supplierName: "Northvale Flexibles",
+    })!;
+    expect(release).toMatchObject({ supplierId: "SUP-118", supplierName: "Northvale Flexibles" });
+    expect(releaseFor(order, "2027-03-08T09:00:00.000Z")).not.toHaveProperty("supplierId");
+
+    const situation = SITUATIONS.find((s) => s.id === order.situationId)!;
+    const row = pendingDecisions(situation, { [release.materialId]: release }).find(
+      (d) => d.materialId === release.materialId
+    )!;
+    expect(row.released).toBe(true);
+    expect(row.releasedTo).toBe("Northvale Flexibles");
+  });
+
   it("returns nothing for a decision that is not an order", () => {
     const other = upcomingDecisions(SITUATIONS, {}).find((d) => !d.materialId);
     expect(other).toBeDefined();
     expect(releaseFor(other!, "2027-03-08T09:00:00.000Z")).toBeUndefined();
+  });
+});
+
+describe("pendingDecisions — every date says what it is", () => {
+  it("labels order, capacity, representation and production dates, and states lead time plainly", () => {
+    const all = SITUATIONS.flatMap((s) => pendingDecisions(s));
+    const labelOf = { material_order: "Order by", line_capacity: "Resolve by", representation: "Decide by", production_start: "Starts" };
+    for (const d of all) expect(d.dateLabel).toBe(labelOf[d.kind]);
+    const order = all.find((d) => d.kind === "material_order" && /Arrives/.test(d.consequence));
+    expect(order?.consequence).toMatch(/^Arrives \d+ days after ordering$/);
   });
 });
 

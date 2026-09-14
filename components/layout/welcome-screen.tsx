@@ -20,12 +20,12 @@
 
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { AlertTriangle, Layers, LineChart, ShieldCheck } from "lucide-react";
+import { Layers, LineChart, LogIn, ShieldCheck } from "lucide-react";
 import { signIn as oauthSignIn } from "next-auth/react";
 import { useCurrentUser } from "@/components/layout/use-current-user";
 import { cn } from "@/lib/utils/cn";
 
-function Welcome({ googleEnabled }: { googleEnabled: boolean }) {
+function Welcome() {
   const router = useRouter();
   const searchParams = useSearchParams();
   // Where they were headed before the front door intercepted them.
@@ -38,10 +38,18 @@ function Welcome({ googleEnabled }: { googleEnabled: boolean }) {
     if (!loading && user) router.replace(next ?? "/start");
   }, [loading, user, next, router]);
 
-  const continueWithGoogle = () => {
+  const continueWithDemo = () => {
     setBusy(true);
-    void oauthSignIn("google", { callbackUrl: next ?? "/start" });
+    void oauthSignIn("demo", { callbackUrl: next ?? "/start" });
   };
+
+  // Google sign-in is switched off for now. To restore it, re-enable the
+  // provider in `auth.ts`, pass `googleEnabled` back in from the page, and
+  // bring back the button and notice commented out below.
+  // const continueWithGoogle = () => {
+  //   setBusy(true);
+  //   void oauthSignIn("google", { callbackUrl: next ?? "/start" });
+  // };
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-[var(--background)] px-5 py-10 sm:px-8 sm:py-16">
@@ -92,6 +100,22 @@ function Welcome({ googleEnabled }: { googleEnabled: boolean }) {
 
             <button
               type="button"
+              onClick={continueWithDemo}
+              disabled={busy}
+              className={cn(
+                "mt-5 flex h-11 w-full items-center justify-center gap-2.5 rounded-[var(--radius-sm)] bg-[var(--accent)] text-[14px] font-medium text-[var(--text-on-accent)] transition-opacity",
+                "hover:opacity-90 active:scale-[0.99]",
+                "disabled:cursor-not-allowed disabled:opacity-60"
+              )}
+              style={{ transitionDuration: "var(--duration-fast)" }}
+            >
+              <LogIn className="size-4" />
+              {busy ? "Signing in…" : "Continue with demo account"}
+            </button>
+
+            {/* Google sign-in — disabled for now.
+            <button
+              type="button"
               onClick={continueWithGoogle}
               disabled={busy || !googleEnabled}
               className={cn(
@@ -104,31 +128,12 @@ function Welcome({ googleEnabled }: { googleEnabled: boolean }) {
               <GoogleMark />
               {busy ? "Redirecting to Google…" : "Continue with Google"}
             </button>
+            */}
 
-            {googleEnabled ? (
-              <p className="mt-5 border-t border-[var(--border)] pt-4 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
-                Signing in identifies you and nothing more. Your planning data — including any
-                workbook you upload — is read in this browser and never sent anywhere.
-              </p>
-            ) : (
-              /* Said out loud rather than worked around. The button used to
-                 fall back to a demo session when Google was not configured,
-                 which meant a sign-in that never happened looked exactly like
-                 one that did — the worst possible failure for a sign-in. */
-              <div className="mt-5 rounded-[var(--radius-sm)] border border-[var(--risk-warning)] bg-[var(--risk-warning-soft)] px-3.5 py-3">
-                <p className="flex items-start gap-2 text-[12px] font-medium leading-snug text-[var(--text-primary)]">
-                  <AlertTriangle className="mt-0.5 size-3.5 flex-none text-[var(--risk-warning)]" />
-                  Sign-in is not configured on this deployment.
-                </p>
-                <p className="mt-1.5 text-[11.5px] leading-relaxed text-[var(--text-secondary)]">
-                  It needs <code className="font-mono text-[11px]">AUTH_GOOGLE_ID</code> and{" "}
-                  <code className="font-mono text-[11px]">AUTH_GOOGLE_SECRET</code> in the
-                  environment, alongside{" "}
-                  <code className="font-mono text-[11px]">AUTH_SECRET</code>. Add them and restart —
-                  nothing else has to change.
-                </p>
-              </div>
-            )}
+            <p className="mt-5 border-t border-[var(--border)] pt-4 text-[11.5px] leading-relaxed text-[var(--text-muted)]">
+              A shared demo account on synthetic data. Anything you upload is read in this browser
+              and never sent anywhere.
+            </p>
           </div>
         </div>
       </div>
@@ -156,8 +161,8 @@ function Point({
   );
 }
 
-/** Google's mark, drawn rather than imported so nothing is hotlinked. */
-function GoogleMark() {
+/** Google's mark, drawn rather than imported so nothing is hotlinked. Unused while Google sign-in is off. */
+export function GoogleMark() {
   return (
     <svg viewBox="0 0 48 48" className="size-4" aria-hidden focusable="false">
       <path
@@ -180,11 +185,11 @@ function GoogleMark() {
   );
 }
 
-export function WelcomeScreen({ googleEnabled }: { googleEnabled: boolean }) {
+export function WelcomeScreen() {
   // `useSearchParams` needs a Suspense boundary around whatever reads it.
   return (
     <Suspense fallback={<main className="min-h-screen bg-[var(--background)]" />}>
-      <Welcome googleEnabled={googleEnabled} />
+      <Welcome />
     </Suspense>
   );
 }

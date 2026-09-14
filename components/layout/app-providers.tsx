@@ -2,11 +2,11 @@
 
 import { useEffect } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { SessionProvider } from "next-auth/react";
+import { SessionProvider, useSession } from "next-auth/react";
 import { useSessionStore } from "@/stores/session-store";
 import { useAppStore, THEME_STORAGE_KEY } from "@/stores/app-store";
-import { useDatasetStore } from "@/stores/dataset-store";
-import { useSituationScenarioStore } from "@/stores/situation-scenario-store";
+import { bindPlanningStorage } from "@/stores/storage-scope";
+import { namespaceFor } from "@/lib/utils/storage-scope";
 import { DatasetProvider } from "@/components/dataset/dataset-provider";
 
 /**
@@ -34,8 +34,10 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
     // The dataset store persists to localStorage rather than the session, so
     // the planner's chosen mode survives a refresh instead of sending them
     // back to the first-run screen.
-    void useDatasetStore.persist.rehydrate();
-    void useSituationScenarioStore.persist.rehydrate();
+    //
+    // The dataset and scenario stores are the exception: their keys belong to
+    // the signed-in account, so `PlanningStorageScope` rehydrates them once
+    // the session says who that is.
     void useSessionStore.persist.rehydrate();
     // Theme lives in localStorage rather than the session slice (it is a
     // durable preference), so it is restored separately and re-applied to the
@@ -48,9 +50,28 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
     // waiting on the network, and everything below reads identity through it.
     <SessionProvider>
       <script dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT }} />
+      <PlanningStorageScope />
       <TooltipProvider>
         <DatasetProvider>{children}</DatasetProvider>
       </TooltipProvider>
     </SessionProvider>
   );
+}
+
+/**
+ * Points planning persistence at the signed-in account. Two accounts on one
+ * browser each see only their own dataset, decisions and scenarios.
+ */
+function PlanningStorageScope() {
+  const { data, status } = useSession();
+  const email = data?.user?.email ?? null;
+
+  useEffect(() => {
+    // Waiting matters: binding to "nobody" while the session is still loading
+    // would drop a returning planner onto the first-run screen for a moment.
+    if (status === "loading") return;
+    void bindPlanningStorage(email ? namespaceFor(email) : null);
+  }, [status, email]);
+
+  return null;
 }

@@ -8,7 +8,6 @@
  */
 
 import { useRouter } from "next/navigation";
-import { useEffect } from "react";
 import { ArrowRight, FileSpreadsheet, RefreshCw, Sparkles } from "lucide-react";
 import { useDatasetStore } from "@/stores/dataset-store";
 import { cn } from "@/lib/utils/cn";
@@ -20,10 +19,6 @@ export default function StartPage() {
   const mode = useDatasetStore((s) => s.mode);
   const seed = useDatasetStore((s) => s.seed);
   const hasHydrated = useDatasetStore((s) => s.hasHydrated);
-
-  useEffect(() => {
-    void useDatasetStore.persist.rehydrate();
-  }, []);
 
   const startDemo = () => {
     chooseDemo();

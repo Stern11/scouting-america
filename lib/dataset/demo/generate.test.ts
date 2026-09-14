@@ -67,6 +67,7 @@ describe("generateDemoDataset — capabilities", () => {
       leadTimeAnalysis: true,
       netRequirements: true,
       readinessHistory: true,
+      lineHistory: true,
     });
   });
 
@@ -442,4 +443,25 @@ describe("generateDemoDataset — the calendar follows the anchor date", () => {
       expect(situation.productionWindow!.start > planningNow.slice(0, 10)).toBe(true);
     }
   });
+});
+
+describe("generateDemoDataset — new products this season", () => {
+  // The unspecified renovation in each programme has no prior-year echo, so it
+  // is a genuinely new product: no row in any earlier comparable season.
+  for (const planningNow of [DEMO_PLANNING_NOW, "2026-09-15T09:00:00Z"]) {
+    it(`flags a new product in every programme, and it is the analogue-derived renovation (${planningNow})`, () => {
+      const situations = buildSituations(generateDemoDataset({ planningNow }));
+      for (const title of ["Halloween", "Holiday", "Valentine"]) {
+        const s = situations.find((x) => x.title.includes(title));
+        expect(s, title).toBeDefined();
+        const fresh = s!.candidateItems.filter((c) => c.isNewThisSeason);
+        expect(fresh.length, title).toBeGreaterThanOrEqual(1);
+        // Nothing is new that has an earlier season in its own history.
+        for (const c of s!.candidateItems) {
+          if (c.seasonHistory.length > 1) expect(c.isNewThisSeason, c.itemName).toBe(false);
+        }
+        expect(fresh.some((c) => c.derivation === "analogue"), title).toBe(true);
+      }
+    });
+  }
 });

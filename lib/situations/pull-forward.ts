@@ -1,219 +1,216 @@
 /**
- * Capacity pull-forward simulation (V2 §46, PRD §14.4, §7.9).
+ * Pulling production forward (V2 §46, PRD §14.4, §7.9).
  *
- * The one capacity lever feedback asked for: "if a line is overloaded, let a
- * planner see what happens if some of that production is pulled into
- * earlier, emptier months instead." This is a *display-time* simulation over
- * an already-computed `CapacityExposure` — it never touches
- * `ScenarioAdjustments` or `applyScenarioToDataset`, is never persisted, and
- * can't disagree with any other page, exactly like the coherence rule
- * requires of anything derived (V2 §53).
+ * The lever a capacity planner reaches for first: "if a line is overloaded,
+ * build some of that production in an earlier month with room." One number per
+ * line — how many weeks a build may move earlier. Never later: building later
+ * lands production in (or after) the sales window, which is not a capacity
+ * fix. This is a pure levelling pass over one line's monthly load — it never
+ * touches a dataset or a scenario override, and is recomputed on every read
+ * (V2 §53).
  *
- * Algorithm: walk a line's months in chronological order. Each overloaded
- * month searches backward for headroom one month at a time — nearest month
- * first — up to `maxWeeks` away, claiming whatever room it finds and moving
- * on to the next-nearest month only if there's still overflow left. "Max
- * pull-forward" means *up to* that many weeks, not *exactly*: an earlier
- * version jumped straight to the single month exactly `maxWeeks` back, which
- * meant a 9-week setting could skip right past an emptier month one month
- * away to reach for a two-months-away month that didn't exist — the nearer,
- * genuinely available month was never even considered. Processing
- * chronologically still means an earlier overloaded month gets first claim
- * on a given month's headroom — which is why, in practice, the first couple
- * of overloaded months tend to resolve fully while later ones only partially
- * do: the room nearest to them was already spent.
+ * Cascading levelling. Months are processed latest first. A month's overflow
+ * moves into the nearest earlier month within reach. When that month has no
+ * room, its own movable load first shifts further back to make room — a chain.
+ * So a July overflow can be freed by building May's items in April, June's in
+ * May and July's in June, even though no single build moves more than the
+ * window allows.
  *
- * This intentionally does not touch `buildRunway`'s `capacity_decision`
- * marker — the per-month "drop-dead" shown here is a local, chart-scoped
- * calculation (month start minus lead time) so this stays a contained
- * addition rather than a change to situation-level runway logic.
+ * Invariants:
+ * - Only movable (carry-forward) lots move; fixed (formal) load never does.
+ * - A lot never lands more than `reach` months before the month it came from.
+ * - Nothing lands before the first month in the series, nor before
+ *   `earliestPeriod` (today's month).
+ * - Hours are only moved, never created or lost.
+ * - Headroom is measured against available hours (100%), not the target: the
+ *   target is a planning buffer, and building into it is a legitimate choice.
  */
 
-import type { CapacityExposure } from "@/types/situation";
 import type { MonthKey } from "@/types/dataset";
-import { addMonths, addDays } from "@/lib/dataset/periods";
+import { addMonths } from "@/lib/dataset/periods";
 
 const AVG_WEEKS_PER_MONTH = 4.345;
+const EPS = 1e-9;
 
-export interface PullForwardCell {
+/** The furthest a build can be pulled forward, in weeks. */
+export const MAX_MOVE_WEEKS = 8;
+
+export type MoveDirection = "earlier" | "none";
+
+/** A movable piece of a month's load — one SKU's carry-forward hours. */
+export interface LevelLot {
+  key: string;
+  hours: number;
+}
+
+export interface LevelMonthInput {
   period: MonthKey;
-  committedHours: number;
-  /** Unresolved hours this month started with, before any pull. */
-  absentHoursBefore: number;
-  /** Hours moved out of this month into an earlier one. */
-  pulledOutHours: number;
-  /** Hours this month absorbed from a later, overloaded month. */
-  pulledInHours: number;
-  /** absentHoursBefore - pulledOutHours + pulledInHours. */
-  remainingAfterHours: number;
-  /** What's still over capacity after pulling — "additional hours needed". */
-  overflowAfterHours: number;
-  /** What was over capacity before any pulling. */
-  overflowBeforeHours: number;
+  /** Load that never moves (the formal plan). */
+  fixedHours: number;
+  /** Load that may be pulled forward, by SKU. */
+  lots: readonly LevelLot[];
   availableHours: number;
-  dropDeadBefore?: string;
-  dropDeadAfter?: string;
 }
 
-export interface PullForwardResult {
-  lineId: string;
-  lineName: string;
-  maxWeeks: number;
-  cells: PullForwardCell[];
-  totalPulledHours: number;
-  totalShortfallHours: number;
+export interface LevelMonth {
+  period: MonthKey;
+  loadBeforeHours: number;
+  availableHours: number;
+  /** Hours whose build moved out of this month into an earlier one. */
+  movedOutHours: number;
+  /** Hours pulled into this month from later months. */
+  movedInHours: number;
+  /** loadBeforeHours − movedOutHours + movedInHours. */
+  loadAfterHours: number;
+  overflowBeforeHours: number;
+  /** What is still over capacity after moving — "additional hours needed". */
+  overflowAfterHours: number;
+}
+
+/** One lot's net move: from the month it was planned in to where it is built. */
+export interface LoadMove {
+  key: string;
+  from: MonthKey;
+  to: MonthKey;
+  hours: number;
+}
+
+export interface LevelResult {
+  weeks: number;
+  direction: MoveDirection;
+  months: LevelMonth[];
+  moves: LoadMove[];
+  totalMovedHours: number;
   totalOverflowBeforeHours: number;
-  /** Units implied by `totalPulledHours`, via a line-blended units/hour rate. */
-  unitsSecured: number;
-  /** Units implied by `totalOverflowBeforeHours` — what's at risk untouched. */
-  unitsAtRisk: number;
-  /** Units implied by `totalShortfallHours` — what's still at risk after pulling. */
-  unitsStillAtRisk: number;
+  totalOverflowAfterHours: number;
 }
 
-/**
- * `maxWeeks` converted to whole months, since the exposure is monthly. Zero
- * stays zero — a slider at 0 should show no movement, not round up to one
- * month via floor/round quirks.
- */
-function monthsFor(maxWeeks: number): number {
-  if (maxWeeks <= 0) return 0;
-  return Math.max(1, Math.round(maxWeeks / AVG_WEEKS_PER_MONTH));
+/** Weeks converted to whole months, since load is monthly. Zero stays zero. */
+export function monthsFor(weeks: number): number {
+  if (weeks <= 0) return 0;
+  return Math.max(1, Math.round(weeks / AVG_WEEKS_PER_MONTH));
 }
 
-export function simulatePullForward(
-  exposure: CapacityExposure,
-  lineId: string,
-  maxWeeks: number,
-  candidateUnitsById: Record<string, number>,
-  leadTimeDaysFor?: (period: MonthKey) => number | undefined
-): PullForwardResult | undefined {
-  const cells = exposure.cells
-    .filter((c) => c.lineId === lineId)
-    .slice()
-    .sort((a, b) => a.period.localeCompare(b.period));
-  if (cells.length === 0) return undefined;
+interface Holding {
+  key: string;
+  origin: number;
+  hours: number;
+}
 
-  const lineName = cells[0]!.lineName;
-  const firstPeriod = cells[0]!.period;
-  const monthsBack = monthsFor(maxWeeks);
+export function levelLoad(
+  input: readonly LevelMonthInput[],
+  weeks: number,
+  options: { earliestPeriod?: MonthKey } = {}
+): LevelResult {
+  const ordered = [...input].sort((a, b) => a.period.localeCompare(b.period));
+  const reach = monthsFor(weeks);
+  const n = ordered.length;
+  const periods = ordered.map((m) => m.period);
+  const indexOf = new Map(periods.map((p, i) => [p, i]));
 
-  const byPeriod = new Map<MonthKey, PullForwardCell>();
-  for (const cell of cells) {
-    const overflowBeforeHours = Math.max(0, cell.formalHours + cell.unresolvedHours - cell.availableHours);
-    byPeriod.set(cell.period, {
-      period: cell.period,
-      committedHours: cell.formalHours,
-      absentHoursBefore: cell.unresolvedHours,
-      pulledOutHours: 0,
-      pulledInHours: 0,
-      remainingAfterHours: cell.unresolvedHours,
-      overflowAfterHours: overflowBeforeHours,
-      overflowBeforeHours,
-      availableHours: cell.availableHours,
-    });
-  }
+  const loadBefore = ordered.map((m) => m.fixedHours + m.lots.reduce((s, l) => s + l.hours, 0));
+  const load = [...loadBefore];
+  // What each month currently builds, by lot and the month it was planned in.
+  const holdings: Holding[][] = ordered.map((m, i) =>
+    m.lots.filter((l) => l.hours > EPS).map((l) => ({ key: l.key, origin: i, hours: l.hours }))
+  );
 
-  // Nearest target actually used per source month, in months-back — the
-  // pulled portion's real shift, not the slider's ceiling. A cell that never
-  // pulls anything keeps this undefined.
-  const nearestBackUsed = new Map<MonthKey, number>();
+  // The earliest index anything may land in.
+  const earliest = options.earliestPeriod;
+  const firstAllowed = earliest === undefined ? 0 : periods.findIndex((p) => p >= earliest);
+  const floorIndex = firstAllowed < 0 ? n : firstAllowed;
 
-  if (monthsBack > 0) {
-    for (const cell of cells) {
-      const working = byPeriod.get(cell.period)!;
-      let overflow = Math.max(0, working.committedHours + working.remainingAfterHours - working.availableHours);
-      if (overflow <= 0) {
-        working.overflowAfterHours = 0;
-        continue;
+  // Months that could not free what was asked. What a month can free never
+  // grows as the pass runs — moves only use up earlier headroom — so a month
+  // exhausted once stays exhausted.
+  const exhausted = new Set<number>();
+
+  /** Moves up to `need` hours of month i's movable load earlier. Returns hours moved. */
+  const pushBack = (i: number, need: number): number => {
+    if (need <= EPS || reach === 0 || exhausted.has(i)) return 0;
+    let moved = 0;
+    for (let k = 1; k <= reach && need - moved > EPS; k++) {
+      const targetPeriod = addMonths(periods[i]!, -k);
+      const j = indexOf.get(targetPeriod);
+      if (j === undefined) {
+        if (targetPeriod < periods[0]!) break;
+        continue; // a gap in the series — try the next month out
       }
+      if (j < floorIndex) break;
 
-      for (let back = 1; back <= monthsBack && overflow > 0; back++) {
-        const targetPeriod = addMonths(cell.period, -back);
-        if (targetPeriod < firstPeriod) break; // nothing further back exists
-        const target = byPeriod.get(targetPeriod);
-        if (!target) continue; // a gap in the exposure — try the next month back
+      const eligible = holdings[i]!.filter((h) => h.origin - j <= reach && h.hours > EPS);
+      const eligibleHours = eligible.reduce((s, h) => s + h.hours, 0);
+      const want = Math.min(need - moved, eligibleHours);
+      if (want <= EPS) continue;
 
-        const targetEffective = target.committedHours + target.remainingAfterHours;
-        const headroom = Math.max(0, target.availableHours - targetEffective);
-        const moved = Math.min(overflow, headroom);
-        if (moved <= 0) continue;
+      // Room is never negative: an earlier month that is itself over keeps its
+      // own overflow for its own turn, so later months get first claim.
+      let room = Math.max(0, ordered[j]!.availableHours - load[j]!);
+      if (room < want - EPS) room += pushBack(j, want - room);
+      const take = Math.min(want, room);
+      if (take <= EPS) continue;
 
-        working.remainingAfterHours -= moved;
-        working.pulledOutHours += moved;
-        target.remainingAfterHours += moved;
-        target.pulledInHours += moved;
-        overflow -= moved;
-        if (!nearestBackUsed.has(cell.period) || back < nearestBackUsed.get(cell.period)!) {
-          nearestBackUsed.set(cell.period, back);
-        }
+      // Largest builds first: fewer, whole SKUs are easier to act on than
+      // slivers of many.
+      let left = take;
+      for (const h of [...eligible].sort((a, b) => b.hours - a.hours || a.key.localeCompare(b.key))) {
+        if (left <= EPS) break;
+        const part = Math.min(h.hours, left);
+        h.hours -= part;
+        left -= part;
+        const into = holdings[j]!.find((x) => x.key === h.key && x.origin === h.origin);
+        if (into) into.hours += part;
+        else holdings[j]!.push({ key: h.key, origin: h.origin, hours: part });
       }
-
-      working.overflowAfterHours = overflow;
+      load[i] = load[i]! - take;
+      load[j] = load[j]! + take;
+      moved += take;
     }
-  }
-
-  // Drop-dead per month: a local, chart-scoped read of month-start minus lead
-  // time. The pulled-forward portion needs its materials that many weeks
-  // earlier too, shifted by however far it actually moved — not by the
-  // slider's ceiling, which may be further than any month it actually reached.
-  for (const cell of byPeriod.values()) {
-    const leadTimeDays = leadTimeDaysFor?.(cell.period);
-    if (leadTimeDays === undefined) continue;
-    const monthStart = `${cell.period}-01`;
-    cell.dropDeadBefore = addDays(monthStart, -leadTimeDays);
-    const back = nearestBackUsed.get(cell.period);
-    cell.dropDeadAfter =
-      back !== undefined ? addDays(`${addMonths(cell.period, -back)}-01`, -leadTimeDays) : cell.dropDeadBefore;
-  }
-
-  const orderedCells = cells.map((c) => byPeriod.get(c.period)!);
-  const totalPulledHours = orderedCells.reduce((sum, c) => sum + c.pulledOutHours, 0);
-  const totalShortfallHours = orderedCells.reduce((sum, c) => sum + c.overflowAfterHours, 0);
-  const totalOverflowBeforeHours = orderedCells.reduce((sum, c) => sum + c.overflowBeforeHours, 0);
-
-  const unitsPerHour = blendedUnitsPerHour(exposure, lineId, candidateUnitsById);
-
-  return {
-    lineId,
-    lineName,
-    maxWeeks,
-    cells: orderedCells,
-    totalPulledHours,
-    totalShortfallHours,
-    totalOverflowBeforeHours,
-    unitsSecured: totalPulledHours * unitsPerHour,
-    unitsAtRisk: totalOverflowBeforeHours * unitsPerHour,
-    unitsStillAtRisk: totalShortfallHours * unitsPerHour,
+    if (need - moved > EPS) exhausted.add(i);
+    return moved;
   };
-}
 
-/**
- * A single blended units/hour rate for the line, from the same contributor
- * hours the capacity build already computed and each contributing
- * candidate's own planned units. Not a per-month rate — good enough to turn
- * "hours pulled" into a headline unit figure without a new input.
- */
-function blendedUnitsPerHour(
-  exposure: CapacityExposure,
-  lineId: string,
-  candidateUnitsById: Record<string, number>
-): number {
-  const hoursByCandidate = new Map<string, number>();
-  for (const cell of exposure.cells) {
-    if (cell.lineId !== lineId) continue;
-    for (const contributor of cell.contributors) {
-      hoursByCandidate.set(
-        contributor.candidateId,
-        (hoursByCandidate.get(contributor.candidateId) ?? 0) + contributor.hours
-      );
+  for (let i = n - 1; i >= 0; i--) {
+    const overflow = load[i]! - ordered[i]!.availableHours;
+    if (overflow > EPS) pushBack(i, overflow);
+  }
+
+  // Net moves: each lot, from the month it was planned in to where it is built.
+  const moves: LoadMove[] = [];
+  const movedOut = new Array<number>(n).fill(0);
+  const movedIn = new Array<number>(n).fill(0);
+  for (let j = 0; j < n; j++) {
+    for (const h of holdings[j]!) {
+      if (h.origin === j || h.hours <= EPS) continue;
+      moves.push({ key: h.key, from: periods[h.origin]!, to: periods[j]!, hours: h.hours });
+      movedOut[h.origin] = movedOut[h.origin]! + h.hours;
+      movedIn[j] = movedIn[j]! + h.hours;
     }
   }
-  let totalHours = 0;
-  let totalUnits = 0;
-  for (const [candidateId, hours] of hoursByCandidate) {
-    totalHours += hours;
-    totalUnits += candidateUnitsById[candidateId] ?? 0;
-  }
-  return totalHours > 0 ? totalUnits / totalHours : 0;
+  moves.sort((a, b) => b.from.localeCompare(a.from) || b.to.localeCompare(a.to) || b.hours - a.hours);
+
+  const months: LevelMonth[] = ordered.map((m, i) => {
+    const after = loadBefore[i]! - movedOut[i]! + movedIn[i]!;
+    return {
+      period: m.period,
+      loadBeforeHours: loadBefore[i]!,
+      availableHours: m.availableHours,
+      movedOutHours: movedOut[i]!,
+      movedInHours: movedIn[i]!,
+      loadAfterHours: after,
+      overflowBeforeHours: Math.max(0, loadBefore[i]! - m.availableHours),
+      overflowAfterHours: Math.max(0, after - m.availableHours),
+    };
+  });
+
+  const totalMovedHours = moves.reduce((s, x) => s + x.hours, 0);
+  return {
+    weeks,
+    direction: totalMovedHours > EPS ? "earlier" : "none",
+    months,
+    moves,
+    totalMovedHours,
+    totalOverflowBeforeHours: months.reduce((s, m) => s + m.overflowBeforeHours, 0),
+    totalOverflowAfterHours: months.reduce((s, m) => s + m.overflowAfterHours, 0),
+  };
 }

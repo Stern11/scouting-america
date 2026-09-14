@@ -1,5 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createMemoryStorage } from "./memory-storage";
+import { setStorageNamespace } from "@/lib/utils/storage-scope";
 
 const localStore = createMemoryStorage();
 const sessionStore = createMemoryStorage();
@@ -7,6 +8,8 @@ const sessionStore = createMemoryStorage();
 beforeAll(() => {
   Object.defineProperty(globalThis, "localStorage", { value: localStore, configurable: true, writable: true });
   Object.defineProperty(globalThis, "sessionStorage", { value: sessionStore, configurable: true, writable: true });
+  // Planning keys are scoped to an account; nothing persists until one is bound.
+  setStorageNamespace("test-account");
 });
 
 const { useDatasetStore, DATASET_STORAGE_KEY } = await import("./dataset-store");
@@ -54,6 +57,7 @@ describe("mode selection", () => {
       fileName: "plan.xlsx",
       uploadedAt: "2027-03-08T09:00:00.000Z",
       datasetName: "plan",
+      stored: true,
     });
     expect(store().mode).toBe("UPLOADED");
     expect(store().uploadedFileName).toBe("plan.xlsx");
@@ -72,7 +76,7 @@ describe("switching source discards decisions made against the old data", () => 
     store().setDisposition("halloween", "hi_1", "carry_forward");
     expect(store().overridesBySituation.halloween?.dispositions.hi_1).toBe("carry_forward");
 
-    store().chooseUpload({ fileName: "p.xlsx", uploadedAt: "x", datasetName: "p" });
+    store().chooseUpload({ fileName: "p.xlsx", uploadedAt: "x", datasetName: "p", stored: true });
     expect(store().overridesBySituation).toEqual({});
     expect(store().activeSituationId).toBeNull();
   });
@@ -85,7 +89,7 @@ describe("switching source discards decisions made against the old data", () => 
   });
 
   it("clearDataset returns to the first-run state", () => {
-    store().chooseUpload({ fileName: "p.xlsx", uploadedAt: "x", datasetName: "p" });
+    store().chooseUpload({ fileName: "p.xlsx", uploadedAt: "x", datasetName: "p", stored: true });
     store().setDisposition("s", "c", "carry_forward");
     store().clearDataset();
     expect(store().mode).toBeNull();
@@ -132,12 +136,20 @@ describe("dispositions", () => {
   });
 });
 
+describe("an upload that only reached this tab", () => {
+  it("is not marked as stored", () => {
+    store().chooseUpload({ fileName: "p.xlsx", uploadedAt: "x", datasetName: "p", stored: false });
+    expect(store().mode).toBe("UPLOADED");
+    expect(store().hasStoredUpload).toBe(false);
+  });
+});
+
 describe("persistence", () => {
   it("writes the chosen mode and decisions to local storage so a refresh keeps them", async () => {
     store().chooseDemo("persisted-seed");
     store().setDisposition("halloween", "hi_1", "carry_forward");
 
-    const raw = localStore.getItem(DATASET_STORAGE_KEY);
+    const raw = localStore.getItem(`${DATASET_STORAGE_KEY}:test-account`);
     expect(raw).not.toBeNull();
     const parsed = JSON.parse(raw!) as { state: Record<string, unknown> };
     expect(parsed.state.mode).toBe("DEMO");
@@ -149,7 +161,7 @@ describe("persistence", () => {
 
   it("never persists a derived situation — only overrides", () => {
     store().chooseDemo();
-    const parsed = JSON.parse(localStore.getItem(DATASET_STORAGE_KEY)!) as {
+    const parsed = JSON.parse(localStore.getItem(`${DATASET_STORAGE_KEY}:test-account`)!) as {
       state: Record<string, unknown>;
     };
     expect(Object.keys(parsed.state).sort()).toEqual(

@@ -106,8 +106,9 @@ function Stat({
       >
         {value}
       </div>
-      <div className="text-[11px] text-[var(--text-muted)]">{label}</div>
-      {sub ? <div className="text-[11px] text-[var(--text-muted)]">{sub}</div> : null}
+      <div className="truncate text-[11px] text-[var(--text-muted)]">{label}</div>
+      {/* On a phone the stats sit in a grid, and one taller cell makes the row ragged. */}
+      {sub ? <div className="hidden text-[11px] text-[var(--text-muted)] md:block">{sub}</div> : null}
     </div>
   );
 }

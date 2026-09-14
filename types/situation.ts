@@ -162,7 +162,10 @@ export interface AnalogueMatch {
   componentCount: number;
   /** The planner has taken this analogue out of the blend. */
   excluded: boolean;
-  /** How much this analogue counts. Defaults to its similarity. */
+  /**
+   * How much this analogue counts. Defaults to its share of the blend, led by
+   * the closest comparable (`findAnalogues`); a planner's weight replaces it.
+   */
   weight: number;
 }
 
@@ -240,6 +243,24 @@ export interface CandidateItem {
   formulaFamily?: string;
   primaryLineId?: string;
   status?: string;
+  /**
+   * The latest date this item can still be made in time: production start
+   * minus the longest lead time among its components. Undefined when there is
+   * no production window, no component picture, or no lead time to read.
+   */
+  deadline?: CandidateDeadline;
+}
+
+/** When an item has to be decided by, and which component sets that date. */
+export interface CandidateDeadline {
+  date: string;
+  /** Whole weeks from planningNow. Negative means already passed. */
+  weeksAway: number;
+  /** The component whose lead time sets the date. */
+  componentId: string;
+  componentName: string;
+  componentType: string;
+  leadTimeDays: number;
 }
 
 /** The expected -> formal -> unresolved bridge shown on Reconcile (V2 §42). */
@@ -249,6 +270,8 @@ export interface ReconciliationBridge {
   unresolvedValue: number;
   expectedUnits?: number;
   formalUnits: number;
+  /** How many items the formal plan carries for this programme. */
+  formalItemCount: number;
   unresolvedUnits: number;
   /** formal / expected, 0-1. */
   representedPct: number;
@@ -281,8 +304,15 @@ export interface CapacityCell {
   customAdjustmentHours: number;
   targetUtilizationPct: number;
   formalHours: number;
+  /** This programme's carry-forward hours. */
   unresolvedHours: number;
-  /** formalHours + unresolvedHours. */
+  /**
+   * Every *other* programme's carry-forward hours on this line-month. Formal
+   * load is plant-wide, and so is carry-forward: a line does not know which
+   * programme an hour belongs to, so neither may its utilisation.
+   */
+  otherProgrammeHours: number;
+  /** formalHours + otherProgrammeHours + unresolvedHours — the line as Overview shows it. */
   effectiveHours: number;
   /** formalHours / availableHours. Infinity guarded to 0 when no hours. */
   formalUtilization: number;
@@ -308,7 +338,10 @@ export interface CapacityExposure {
   cells: CapacityCell[];
   lines: { lineId: string; lineName: string; plant: string }[];
   periods: MonthKey[];
-  /** Lines whose effective utilisation exceeds target in at least one month. */
+  /**
+   * Lines this programme's carry-forward helps push past target in at least
+   * one month. A line hot on formal work alone is not something Heizen found.
+   */
   exposedLineIds: string[];
   /** The single worst cell by effective utilisation, if any. */
   peak?: CapacityCell;
@@ -530,6 +563,12 @@ export interface MaterialRelease {
   decisionDate: string;
   releasedAt: string;
   note?: string;
+  /**
+   * The supplier the planner chose to award it to. Absent for a release made
+   * without supplier history to choose from — never guessed.
+   */
+  supplierId?: string;
+  supplierName?: string;
 }
 
 /** Planner decisions that live outside the dataset and drive recomputation. */

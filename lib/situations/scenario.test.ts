@@ -8,6 +8,8 @@ import {
   countAdjustments,
   diffAdjustments,
   mappingKey,
+  normalizeShares,
+  sameAdjustments,
 } from "./scenario";
 import { EMPTY_ADJUSTMENTS, type ScenarioAdjustments } from "@/types/situation";
 
@@ -77,6 +79,49 @@ describe("applyScenarioToDataset", () => {
     );
     expect(changed?.runRateUnitsPerHour).toBe(5000);
     expect(changed?.allocationPct).toBe(0.25);
+  });
+});
+
+describe("line split always sums to 100%", () => {
+  it("rebalances untouched lines around the one the planner set", () => {
+    const shares = normalizeShares([{ baseline: 0.55, override: 0.8 }, { baseline: 0.45 }]);
+    expect(shares[0]).toBeCloseTo(0.8, 9);
+    expect(shares[1]).toBeCloseTo(0.2, 9);
+  });
+
+  it("splits the remainder by baseline share across several untouched lines", () => {
+    const shares = normalizeShares([{ baseline: 0.5, override: 0.4 }, { baseline: 0.2 }, { baseline: 0.3 }]);
+    expect(shares[1]).toBeCloseTo(0.24, 9);
+    expect(shares[2]).toBeCloseTo(0.36, 9);
+  });
+
+  it("scales held lines down when they alone exceed 100%", () => {
+    expect(normalizeShares([{ baseline: 0.55, override: 1 }, { baseline: 0.45, override: 1 }])).toEqual([0.5, 0.5]);
+  });
+
+  it("never applies 200% of a family", () => {
+    const applied = applyScenarioToDataset(
+      dataset,
+      adjustments({
+        allocation: {
+          [mappingKey("Variety Bags", "LINE-03")]: 1,
+          [mappingKey("Variety Bags", "LINE-04")]: 1,
+        },
+      })
+    );
+    const family = applied.itemLineMappings.filter(
+      (r) => r.mappingLevel === "PRODUCT_FAMILY" && r.itemOrFamilyId === "Variety Bags"
+    );
+    expect(family.reduce((s, r) => s + (r.allocationPct ?? 0), 0)).toBeCloseTo(1, 9);
+  });
+
+  it("leaves families the scenario does not touch exactly as the data says", () => {
+    const applied = applyScenarioToDataset(
+      dataset,
+      adjustments({ allocation: { [mappingKey("Variety Bags", "LINE-03")]: 0.7 } })
+    );
+    const tins = applied.itemLineMappings.filter((r) => r.itemOrFamilyId === "Gift Tins");
+    for (const row of tins) expect(dataset.itemLineMappings).toContain(row);
   });
 });
 
@@ -161,5 +206,15 @@ describe("helpers", () => {
     expect(clamp(5, { min: 0, max: 10 })).toBe(5);
     expect(clamp(-1, { min: 0, max: 10 })).toBe(0);
     expect(clamp(11, { min: 0, max: 10 })).toBe(10);
+  });
+});
+
+describe("sameAdjustments", () => {
+  it("treats a missing category as empty and compares values key by key", () => {
+    expect(sameAdjustments(EMPTY_ADJUSTMENTS, { availableHours: {} })).toBe(true);
+    expect(sameAdjustments(adjustments({ volumeUnits: { a: 86 } }), adjustments({ volumeUnits: { a: 86 } }))).toBe(true);
+    expect(sameAdjustments(adjustments({ volumeUnits: { a: 86 } }), adjustments({ volumeUnits: { a: 867_000 } }))).toBe(false);
+    expect(sameAdjustments(adjustments({ volumeUnits: { a: 86 } }), EMPTY_ADJUSTMENTS)).toBe(false);
+    expect(sameAdjustments(adjustments({ volumeUnits: { a: 1 } }), adjustments({ volumeUnits: { b: 1 } }))).toBe(false);
   });
 });

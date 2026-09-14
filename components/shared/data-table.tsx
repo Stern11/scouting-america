@@ -85,7 +85,7 @@ export function DataTable<T>({
   };
 
   if (rows.length === 0 && empty) {
-    return <div className="py-8 text-[13px] text-[var(--text-muted)]">{empty}</div>;
+    return <div className="py-4 text-[13px] text-[var(--text-muted)]">{empty}</div>;
   }
 
   return (
@@ -140,7 +140,9 @@ export function DataTable<T>({
                     type="button"
                     onClick={() => toggleSort(column.key)}
                     className={cn(
-                      "inline-flex items-center gap-1 hover:text-[var(--text-primary)]",
+                      // Buttons reset text-transform and letter-spacing, which left sortable
+                      // headers in mixed case beside uppercase ones.
+                      "inline-flex items-center gap-1 uppercase tracking-[inherit] hover:text-[var(--text-primary)]",
                       column.numeric && "flex-row-reverse"
                     )}
                   >

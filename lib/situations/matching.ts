@@ -308,27 +308,28 @@ export const DISPOSITION_LABELS: Record<ContributorDisposition, string> = {
  * item, so the assignment is what the planner actually means by "this one came
  * back and that one did not".
  *
- * Greedy by descending score, which is sufficient here: pairs at score 1
- * (a shared item id) are exact successors and always win, and the remainder
- * are attribute ties where any consistent choice reads the same to a planner.
+ * The assignment is solved, not picked greedily. Taking the single best pair
+ * first can strand a second prior item whose only acceptable match was the
+ * one just taken — and a stranded item becomes carry-forward load, i.e. a
+ * planning gap the matcher invented. In order of priority:
+ *
+ * 1. A carried-over item id is direct evidence and is assigned before anything
+ *    is inferred.
+ * 2. Represent as many prior items as the threshold allows.
+ * 3. Among those, the highest total match score.
+ * 4. Then more compared attributes, then earlier ids, so ties are stable.
  */
 export function assignRepresentation(
   historicalItems: readonly HistoricalItemRow[],
   currentItems: readonly CurrentPlanRow[],
   config: MatchConfig = DEFAULT_MATCH_CONFIG
 ): Map<string, MatchResult> {
-  interface Pair {
-    historicalId: string;
-    currentItemId: string;
-    result: MatchResult;
-  }
-
-  const pairs: Pair[] = [];
+  const edges: Edge[] = [];
   const best = new Map<string, MatchResult>();
 
-  for (const historical of historicalItems) {
+  historicalItems.forEach((historical, h) => {
     let bestForRow: MatchResult | undefined;
-    for (const current of currentItems) {
+    currentItems.forEach((current, c) => {
       const result = compareToCurrentItem(historical, current, config);
       if (
         bestForRow === undefined ||
@@ -337,10 +338,8 @@ export function assignRepresentation(
       ) {
         bestForRow = result;
       }
-      if (result.score >= config.threshold) {
-        pairs.push({ historicalId: historical.id, currentItemId: current.itemId, result });
-      }
-    }
+      if (result.score >= config.threshold) edges.push({ h, c, result });
+    });
     // Kept so an unassigned row can still explain which attributes lined up.
     best.set(
       historical.id,
@@ -348,30 +347,184 @@ export function assignRepresentation(
         ? { ...bestForRow, matchedItemId: undefined, matchedItemName: undefined, matchedUnits: undefined }
         : { score: 0, comparedDimensions: 0, outcomes: [] }
     );
-  }
+  });
 
-  pairs.sort(
-    (a, b) =>
-      b.result.score - a.result.score ||
-      b.result.comparedDimensions - a.result.comparedDimensions ||
-      a.historicalId.localeCompare(b.historicalId)
+  // Rank by id so ties resolve the same way whatever order the rows arrive in.
+  const rowRank = new Map(
+    historicalItems
+      .map((row, h) => ({ id: row.id, h }))
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map(({ h }, rank) => [h, rank] as const)
   );
 
-  const takenHistorical = new Set<string>();
-  const takenCurrent = new Set<string>();
   const assigned = new Map<string, MatchResult>();
+  const takenRow = new Set<number>();
+  const takenCol = new Set<number>();
+  const take = (edge: Edge) => {
+    takenRow.add(edge.h);
+    takenCol.add(edge.c);
+    assigned.set(historicalItems[edge.h]!.id, edge.result);
+  };
 
-  for (const pair of pairs) {
-    if (takenHistorical.has(pair.historicalId) || takenCurrent.has(pair.currentItemId)) continue;
-    takenHistorical.add(pair.historicalId);
-    takenCurrent.add(pair.currentItemId);
-    assigned.set(pair.historicalId, pair.result);
+  const exact = edges
+    .filter((e) => historicalItems[e.h]!.itemId === currentItems[e.c]!.itemId)
+    .sort((a, b) => rowRank.get(a.h)! - rowRank.get(b.h)! || a.c - b.c);
+  for (const edge of exact) {
+    if (!takenRow.has(edge.h) && !takenCol.has(edge.c)) take(edge);
+  }
+
+  const open = edges.filter((e) => !takenRow.has(e.h) && !takenCol.has(e.c));
+  const tieScale = 1e-9 / ((historicalItems.length + 1) * (currentItems.length + 1));
+  for (const group of connectedGroups(open, historicalItems.length)) {
+    const k = Math.min(new Set(group.map((e) => e.h)).size, new Set(group.map((e) => e.c)).size);
+    // Lexicographic objective as one weight. `cardinality` exceeds any sum of
+    // scores, so one more represented item always beats a better score; the
+    // attribute and id terms are too small to outweigh a real score difference.
+    const cardinality = 2 * (k + 1);
+    const perDimension = 1e-3 / (k + 1);
+    const weight = (e: Edge) =>
+      cardinality +
+      e.result.score +
+      e.result.comparedDimensions * perDimension +
+      ((historicalItems.length - rowRank.get(e.h)!) * (currentItems.length + 1) + (currentItems.length - e.c)) *
+        tieScale;
+    for (const edge of solveAssignment(group, weight)) take(edge);
   }
 
   for (const [id, result] of best) {
     if (!assigned.has(id)) assigned.set(id, result);
   }
   return assigned;
+}
+
+interface Edge {
+  /** Index into the historical items. */
+  h: number;
+  /** Index into the current items. */
+  c: number;
+  result: MatchResult;
+}
+
+/**
+ * Splits the eligible pairs into groups that cannot affect each other. With
+ * the default weights a group is roughly one brand and family, which keeps
+ * each assignment problem small enough to solve on every recompute.
+ */
+function connectedGroups(edges: readonly Edge[], rowCount: number): Edge[][] {
+  const parent = new Map<number, number>();
+  const find = (x: number): number => {
+    let root = x;
+    while (parent.has(root) && parent.get(root) !== root) root = parent.get(root)!;
+    parent.set(x, root);
+    return root;
+  };
+  const union = (a: number, b: number) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  };
+
+  // Columns are offset past the rows so both live in one id space.
+  for (const e of edges) union(e.h, rowCount + e.c);
+
+  const groups = new Map<number, Edge[]>();
+  for (const e of edges) {
+    const root = find(e.h);
+    const list = groups.get(root);
+    if (list) list.push(e);
+    else groups.set(root, [e]);
+  }
+  return [...groups.values()];
+}
+
+/** The subset of `edges` that forms a one-to-one assignment of maximum total weight. */
+function solveAssignment(edges: readonly Edge[], weight: (e: Edge) => number): Edge[] {
+  const rows = [...new Set(edges.map((e) => e.h))].sort((a, b) => a - b);
+  const cols = [...new Set(edges.map((e) => e.c))].sort((a, b) => a - b);
+
+  // The solver needs rows <= columns, so the smaller side becomes the rows.
+  const transpose = rows.length > cols.length;
+  const side = transpose ? cols : rows;
+  const other = transpose ? rows : cols;
+  const sideIndex = new Map(side.map((x, i) => [x, i]));
+  const otherIndex = new Map(other.map((x, i) => [x, i]));
+
+  const byCell = new Map<string, Edge>();
+  // A pair below threshold is simply absent: weight 0, so the solver only
+  // "uses" it when there is nothing else, and it is dropped afterwards.
+  const weights = side.map(() => new Array<number>(other.length).fill(0));
+  for (const e of edges) {
+    const i = sideIndex.get(transpose ? e.c : e.h)!;
+    const j = otherIndex.get(transpose ? e.h : e.c)!;
+    weights[i]![j] = weight(e);
+    byCell.set(`${i}:${j}`, e);
+  }
+
+  const out: Edge[] = [];
+  maxWeightAssignment(weights, other.length).forEach((j, i) => {
+    const edge = byCell.get(`${i}:${j}`);
+    if (edge) out.push(edge);
+  });
+  return out;
+}
+
+/**
+ * Kuhn–Munkres (Hungarian) assignment, maximising total weight. `weights` is
+ * n x m with n <= m; returns the column assigned to each row. O(n^2 m).
+ */
+function maxWeightAssignment(weights: readonly (readonly number[])[], m: number): number[] {
+  const n = weights.length;
+  const u = new Array<number>(n + 1).fill(0);
+  const v = new Array<number>(m + 1).fill(0);
+  // p[j]: the (1-based) row holding column j; p[0] is the row being placed.
+  const p = new Array<number>(m + 1).fill(0);
+  const way = new Array<number>(m + 1).fill(0);
+  const cost = (i: number, j: number) => -weights[i - 1]![j - 1]!;
+
+  for (let i = 1; i <= n; i++) {
+    p[0] = i;
+    let j0 = 0;
+    const minv = new Array<number>(m + 1).fill(Infinity);
+    const used = new Array<boolean>(m + 1).fill(false);
+    do {
+      used[j0] = true;
+      const i0 = p[j0]!;
+      let delta = Infinity;
+      let j1 = 0;
+      for (let j = 1; j <= m; j++) {
+        if (used[j]) continue;
+        const reduced = cost(i0, j) - u[i0]! - v[j]!;
+        if (reduced < minv[j]!) {
+          minv[j] = reduced;
+          way[j] = j0;
+        }
+        if (minv[j]! < delta) {
+          delta = minv[j]!;
+          j1 = j;
+        }
+      }
+      for (let j = 0; j <= m; j++) {
+        if (used[j]) {
+          u[p[j]!] = u[p[j]!]! + delta;
+          v[j] = v[j]! - delta;
+        } else {
+          minv[j] = minv[j]! - delta;
+        }
+      }
+      j0 = j1;
+    } while (p[j0] !== 0);
+    do {
+      const j1 = way[j0]!;
+      p[j0] = p[j1]!;
+      j0 = j1;
+    } while (j0 !== 0);
+  }
+
+  const rowToCol = new Array<number>(n).fill(-1);
+  for (let j = 1; j <= m; j++) {
+    if (p[j]! > 0) rowToCol[p[j]! - 1] = j - 1;
+  }
+  return rowToCol;
 }
 
 /**

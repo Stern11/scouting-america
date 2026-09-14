@@ -20,6 +20,7 @@ export const SHEET_NAMES = [
   "Lead_Time_History",
   "Inventory_Supply",
   "Readiness_History",
+  "Line_History",
 ] as const;
 
 export type SheetName = (typeof SHEET_NAMES)[number];

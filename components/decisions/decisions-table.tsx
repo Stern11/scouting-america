@@ -115,6 +115,40 @@ export function DecisionsTable({
       columns={columns}
       rowKey={(row) => `${row.situationId}:${row.item.id}`}
       initialSort={{ key: "value", direction: "desc" }}
+      minWidth={880}
+      card={(row) => (
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="truncate text-[13px] font-medium text-[var(--text-primary)]">{row.item.itemName}</div>
+              <div className="truncate text-[11.5px] text-[var(--text-muted)]">
+                <Link href={`/workspace/${row.situationId}/reconcile`} className="text-[var(--text-secondary)] hover:underline">
+                  {row.situationTitle}
+                </Link>
+                {` · ${row.item.itemId}`}
+              </div>
+            </div>
+            <div className="flex-none text-right">
+              <div className="text-[13px] font-medium tabular-nums text-[var(--text-primary)]">
+                {fmtMoney(row.item.actualValue, row.currency)}
+              </div>
+              <div className="text-[11px] tabular-nums text-[var(--text-muted)]">{fmtUnits(row.item.actualUnits)} prior</div>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5 text-[11.5px] text-[var(--text-muted)]">
+            <DispositionBadge disposition={row.item.proposedDisposition} />
+            <span aria-hidden>→</span>
+            <DispositionBadge disposition={row.item.disposition} />
+            <span className="ml-auto">
+              {LOAD_BEARING_DISPOSITIONS.includes(row.item.disposition) ? (
+                <span className="text-[var(--state-validated)]">Counts as load</span>
+              ) : (
+                "No load"
+              )}
+            </span>
+          </div>
+        </div>
+      )}
       empty={
         <span>
           No decisions have been recorded yet. Open a situation in the{" "}

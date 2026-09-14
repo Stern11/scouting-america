@@ -30,7 +30,7 @@ function DialogContent({
         {...props}
       >
         {children}
-        <DialogPrimitive.Close className="absolute right-4 top-4 rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:text-[var(--text-primary)] focus-visible:outline-none">
+        <DialogPrimitive.Close className="absolute right-2.5 top-2.5 grid size-8 place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--interaction-hover)] hover:text-[var(--text-primary)] focus-visible:outline-none">
           <X className="size-4" />
           <span className="sr-only">Close</span>
         </DialogPrimitive.Close>

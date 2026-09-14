@@ -70,7 +70,7 @@ function DrawerContent({
               </DialogPrimitive.Description>
             ) : null}
           </div>
-          <DialogPrimitive.Close className="-mr-1 flex-none rounded-[var(--radius-sm)] p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--interaction-hover)] hover:text-[var(--text-primary)] focus-visible:outline-none">
+          <DialogPrimitive.Close className="-mr-2 -mt-1 grid size-8 flex-none place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] transition-colors hover:bg-[var(--interaction-hover)] hover:text-[var(--text-primary)] focus-visible:outline-none">
             <X className="size-4" />
             <span className="sr-only">Close</span>
           </DialogPrimitive.Close>

@@ -20,10 +20,7 @@ export function CommittedLog({ entries }: { entries: CommittedEntry[] }) {
 
   if (entries.length === 0) {
     return (
-      <p className="py-4 text-[13px] text-[var(--text-muted)]">
-        Nothing released or committed yet. Release a component from the list above, or commit a
-        volume on a product in a programme&apos;s workspace.
-      </p>
+      <p className="py-4 text-[13px] text-[var(--text-muted)]">Nothing released or committed yet.</p>
     );
   }
 
@@ -37,14 +34,16 @@ export function CommittedLog({ entries }: { entries: CommittedEntry[] }) {
             </div>
             <div className="truncate text-[11.5px] text-[var(--text-muted)]">
               <Link
-                href={`/workspace/${entry.situationId}/decide`}
+                href={`/workspace/${entry.situationId}/reconcile`}
                 className="text-[var(--text-secondary)] hover:underline"
               >
                 {entry.situationTitle}
               </Link>
               {" · "}
               {entry.kind === "release"
-                ? `Released for ordering · order by ${fmtDateShort(entry.release.decisionDate)}`
+                ? `Released${
+                    entry.release.supplierName ? ` to ${entry.release.supplierName}` : " for ordering"
+                  } · order by ${fmtDateShort(entry.release.decisionDate)}`
                 : `Volume committed · ${entry.commitment.basisLabel} would have carried ${fmtUnits(
                     entry.commitment.basisUnits
                   )}`}
@@ -78,7 +77,7 @@ export function CommittedLog({ entries }: { entries: CommittedEntry[] }) {
                   : releaseCommitment(entry.situationId, entry.commitment.candidateId)
               }
               title={entry.kind === "release" ? "Take the release back" : "Drop the committed volume"}
-              className="text-[11.5px] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
+              className="-my-2 inline-flex h-8 items-center px-1 text-[11.5px] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
               style={{ transitionDuration: "var(--duration-fast)" }}
             >
               Undo

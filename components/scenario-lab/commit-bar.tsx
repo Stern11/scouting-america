@@ -47,6 +47,10 @@ export function CommitBar({
     .map(([candidateId, units]) => {
       const item = scenario.candidateItems.find((c) => c.id === candidateId);
       if (!item) return undefined;
+      // Committing marks an item carry forward. Whether a SKU is carried is a
+      // Reconcile decision, so a volume tested on a to-decide SKU sizes the gap
+      // here but is never slipped into the plan by this button.
+      if (item.disposition !== "carry_forward") return undefined;
       const already = committed[candidateId];
       if (already && already.units === units) return undefined;
       return { item, units, already };
@@ -77,9 +81,9 @@ export function CommitBar({
   );
 
   return (
-    <div className="mt-8 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface)] px-5 py-4">
+    <div className="mt-8 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface)] px-4 py-4 sm:px-5">
       {pending.length > 0 ? (
-        <div className="flex items-center justify-between gap-6">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
           <div className="min-w-0">
             <div className="text-[13px] font-medium text-[var(--text-primary)]">
               {pending.length} volume change{pending.length === 1 ? "" : "s"} not in the plan yet
@@ -97,7 +101,7 @@ export function CommitBar({
           <button
             type="button"
             onClick={commitAll}
-            className="inline-flex flex-none items-center gap-1.5 rounded-[var(--radius-sm)] bg-[var(--accent)] px-3.5 py-2 text-[13px] font-medium text-[var(--text-on-accent)] transition-opacity hover:opacity-90"
+            className="inline-flex flex-none items-center justify-center gap-1.5 self-stretch rounded-[var(--radius-sm)] sm:self-auto bg-[var(--accent)] px-3.5 py-2 text-[13px] font-medium text-[var(--text-on-accent)] transition-opacity hover:opacity-90"
             style={{ transitionDuration: "var(--duration-fast)" }}
           >
             <Check className="size-3.5" />

@@ -8,11 +8,15 @@
  * precision), but to say *this is what comparable products need, and here is
  * how comparable they actually are*.
  *
- * Two rules this module exists to hold:
+ * Three rules this module exists to hold:
  *
  * - Similarity is explained by naming attributes, never by a bare percentage.
  *   A planner can argue with "different pack format"; they cannot argue with
  *   64%.
+ * - The closest comparable leads the blend. A planner reading a BOM off four
+ *   near-identical products at 25% each learns nothing about which one it is
+ *   really copied from; a blend led by the closest, with a thinning tail, is
+ *   the one they would build by hand.
  * - Confidence falls with disagreement. A component every analogue carries is
  *   better evidenced than one only the weakest of them does, and the two must
  *   never come out looking the same.
@@ -46,6 +50,25 @@ const MIN_SIMILARITY = 0.35;
 /** More than this and the tail adds noise rather than evidence. */
 const MAX_ANALOGUES = 4;
 
+/**
+ * How the default blend is weighted. An analogue's weight is
+ *
+ *     similarity ^ SIMILARITY_SHARPNESS  ×  RANK_DECAY ^ rank
+ *
+ * normalised so the blend adds to 100%. Rank orders by similarity, then by the
+ * most recent season, so two equally similar products never split the blend
+ * evenly: the one that ran most recently is the better guide to what the new
+ * one will be made of.
+ *
+ * With four near-identical analogues that puts ~62% on the closest, ~25% on
+ * the next, and a thin tail — skewed enough to say which product the BOM is
+ * really read from, while every analogue still counts toward confidence. The
+ * sharpening makes a genuinely less similar product fall away faster than rank
+ * alone would.
+ */
+export const SIMILARITY_SHARPNESS = 4;
+export const RANK_DECAY = 0.4;
+
 function attr(row: HistoricalItemRow, key: (typeof DIMENSIONS)[number]["key"]): string | undefined {
   const value = row[key];
   if (value === undefined || value === null) return undefined;
@@ -53,7 +76,17 @@ function attr(row: HistoricalItemRow, key: (typeof DIMENSIONS)[number]["key"]): 
 }
 
 /**
- * Ranks comparable products, explaining each one.
+ * When a comparable product last ran. Production start where the data has it —
+ * a period key such as "2026-Valentine" does not sort in calendar order against
+ * "2026-Holiday" — else the sales window, else the period itself.
+ */
+function recencyKey(row: HistoricalItemRow): string {
+  return row.productionWindow?.start ?? row.salesWindow?.start ?? row.historicalPeriod;
+}
+
+/**
+ * Ranks comparable products, explaining each one, and weights the default
+ * blend toward the closest (see `RANK_DECAY`).
  *
  * Only products that actually have a BOM are offered: an analogue with nothing
  * to copy is not an analogue, and returning one would produce an item that
@@ -66,7 +99,7 @@ export function findAnalogues(
   options: { excluded?: readonly string[]; limit?: number } = {}
 ): AnalogueMatch[] {
   const excluded = new Set(options.excluded ?? []);
-  const scored: AnalogueMatch[] = [];
+  const scored: (AnalogueMatch & { recency: string })[] = [];
 
   for (const row of pool) {
     if (row.id === target.id) continue;
@@ -106,15 +139,30 @@ export function findAnalogues(
       different,
       componentCount: bomByParent.get(row.itemId)?.length ?? 0,
       excluded: excluded.has(row.id),
-      // Default weight is the similarity itself: a closer product should
-      // count for more until a planner says otherwise.
-      weight: similarity,
+      weight: 0,
+      recency: recencyKey(row),
     });
   }
 
-  return scored
-    .sort((a, b) => b.similarity - a.similarity || a.itemName.localeCompare(b.itemName))
+  const ranked = scored
+    .sort(
+      (a, b) =>
+        b.similarity - a.similarity ||
+        b.recency.localeCompare(a.recency) ||
+        a.itemName.localeCompare(b.itemName) ||
+        a.candidateId.localeCompare(b.candidateId)
+    )
     .slice(0, options.limit ?? MAX_ANALOGUES);
+
+  const raw = ranked.map((a, rank) => a.similarity ** SIMILARITY_SHARPNESS * RANK_DECAY ** rank);
+  const total = raw.reduce((sum, w) => sum + w, 0);
+
+  return ranked.map((scoredRow, rank) => {
+    const analogue: AnalogueMatch & { recency?: string } = { ...scoredRow };
+    delete analogue.recency;
+    // The default share of the blend. A planner's weight replaces it.
+    return { ...analogue, weight: total > 0 ? (raw[rank] ?? 0) / total : 0 };
+  });
 }
 
 /**
@@ -182,18 +230,28 @@ export function blendAnalogueBoms(
     .sort((a, b) => b.confidence - a.confidence || a.componentName.localeCompare(b.componentName));
 }
 
+/** Each included analogue's share of the blend, 0-1, keyed by its row id. */
+export function blendShares(analogues: readonly AnalogueMatch[]): Map<string, number> {
+  const included = analogues.filter((a) => !a.excluded && a.weight > 0);
+  const total = included.reduce((sum, a) => sum + a.weight, 0);
+  return new Map(included.map((a) => [a.candidateId, total > 0 ? a.weight / total : 0]));
+}
+
 /**
  * One line describing the derivation, for a screen that has to say where a
- * number came from before a planner will act on it.
+ * number came from before a planner will act on it. Names the product the
+ * blend leads with and the share it carries — the same share the drawer shows.
  */
 export function describeAnalogueBasis(analogues: readonly AnalogueMatch[]): string {
-  const included = analogues.filter((a) => !a.excluded && a.weight > 0);
-  if (included.length === 0) return "No comparable product with a bill of materials was found.";
+  const shares = blendShares(analogues);
+  const included = analogues
+    .filter((a) => shares.has(a.candidateId))
+    .sort((a, b) => (shares.get(b.candidateId) ?? 0) - (shares.get(a.candidateId) ?? 0));
+  const lead = included[0];
+  if (!lead) return "No comparable product with a bill of materials was found.";
 
-  const best = included[0];
-  const rest = included.length - 1;
-  const pct = best ? `${Math.round(best.similarity * 100)}%` : "";
-  return rest > 0
-    ? `Derived from ${included.length} comparable products, closest ${best?.itemName} (${pct} of compared attributes agree)`
-    : `Derived from ${best?.itemName} (${pct} of compared attributes agree)`;
+  const share = Math.round((shares.get(lead.candidateId) ?? 0) * 100);
+  return included.length > 1
+    ? `Read from ${included.length} comparable products, led by ${lead.itemName} (${share}% of the blend)`
+    : `Read from ${lead.itemName}`;
 }

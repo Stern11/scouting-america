@@ -34,16 +34,79 @@ const GROWTH_CEILING = 2;
  * year is the same product as `SKU-…-…` in the next. What survives a season
  * boundary is the business description of the product, so that is what we key
  * on. Falls back down the chain when a workbook does not carry every attribute.
+ *
+ * Pack size and flavour are part of the identity even when a base pack is
+ * present: a milk and a dark variant can share a base pack, and treating them
+ * as one product would blend two histories into one plan line. Packaging type
+ * and formulation are deliberately left out — they change with a graphics or
+ * pack refresh, which is exactly when the product is meant to carry forward.
  */
 export function crossSeasonKey(row: HistoricalItemRow): string {
   const parts = [
     row.brand,
     row.productFamily,
     row.basePack ?? row.packFormat ?? row.itemName,
+    row.packSize === undefined ? "" : String(row.packSize),
+    row.flavorOrVariant ?? "",
     row.customer ?? "",
     row.channel ?? "",
   ];
   return parts.map((p) => (p ?? "").trim().toLowerCase()).join("::");
+}
+
+/**
+ * The identity key for every row, refined wherever attributes alone cannot
+ * tell two products apart.
+ *
+ * Two rows in the *same* season with the same attribute key are two products,
+ * not one — a season cannot contain two observations of one SKU. Collapsing
+ * them would keep one and silently drop the other's volume. So a key that
+ * collides anywhere is refined for every row carrying it, in every season
+ * (first by item name, then by item id), which keeps the refinement consistent
+ * across seasons instead of splitting one product's history from itself.
+ */
+export function identityKeys(rows: readonly HistoricalItemRow[]): Map<HistoricalItemRow, string> {
+  let keys = new Map(rows.map((r) => [r, crossSeasonKey(r)] as const));
+  const refiners: ((r: HistoricalItemRow) => string)[] = [
+    (r) => r.itemName,
+    (r) => r.itemId,
+    // Only reached by a true duplicate row. Kept apart rather than merged or
+    // dropped, so its volume is still visible to the planner.
+    (r) => r.id,
+  ];
+  for (const refine of refiners) {
+    const ambiguous = collidingKeys(rows, keys);
+    if (ambiguous.size === 0) break;
+    keys = new Map(
+      rows.map((r) => {
+        const key = keys.get(r)!;
+        return [r, ambiguous.has(key) ? `${key}::${refine(r).trim().toLowerCase()}` : key] as const;
+      })
+    );
+  }
+  return keys;
+}
+
+/** Rows whose attributes alone do not identify them within their season. */
+export function ambiguousIdentityRows(rows: readonly HistoricalItemRow[]): HistoricalItemRow[] {
+  const keys = new Map(rows.map((r) => [r, crossSeasonKey(r)] as const));
+  const ambiguous = collidingKeys(rows, keys);
+  return rows.filter((r) => ambiguous.has(keys.get(r)!));
+}
+
+function collidingKeys(
+  rows: readonly HistoricalItemRow[],
+  keys: ReadonlyMap<HistoricalItemRow, string>
+): Set<string> {
+  const seen = new Set<string>();
+  const colliding = new Set<string>();
+  for (const row of rows) {
+    const key = keys.get(row)!;
+    const inPeriod = `${row.historicalPeriod}\u0000${key}`;
+    if (seen.has(inPeriod)) colliding.add(key);
+    else seen.add(inPeriod);
+  }
+  return colliding;
 }
 
 /**
@@ -199,14 +262,26 @@ export function collapseToSkus(
   // Measured against the *whole* history, not the selected basis: a product is
   // not new because the planner narrowed the seasons, and calling it new on
   // that basis would flip the marker every time they changed the control.
-  const earliestPeriod = availablePeriods(rows)[0];
-  const seenEarly = new Set(
-    rows.filter((r) => r.historicalPeriod === earliestPeriod).map((r) => crossSeasonKey(r))
-  );
+  // Keyed over the whole history for the same reason: a refinement that
+  // depended on the selected seasons would move a SKU's id with the control.
+  //
+  // New means the product's first row in the data is in the season it is
+  // offered from: it has no row in *any* earlier comparable season. Judged
+  // against every season, not only the earliest — a product that first ran two
+  // seasons ago is a repeat, not new, however many seasons there are.
+  const keyOf = identityKeys(rows);
+  const periods = availablePeriods(rows);
+  const earliestPeriod = periods[0];
+  const firstSeen = new Map<string, PeriodKey>();
+  for (const r of rows) {
+    const key = keyOf.get(r)!;
+    const seen = firstSeen.get(key);
+    if (seen === undefined || r.historicalPeriod < seen) firstSeen.set(key, r.historicalPeriod);
+  }
 
   const bySku = new Map<string, HistoricalItemRow[]>();
   for (const row of inBasis) {
-    const key = crossSeasonKey(row);
+    const key = keyOf.get(row)!;
     const list = bySku.get(key);
     if (list) list.push(row);
     else bySku.set(key, [row]);
@@ -246,8 +321,11 @@ export function collapseToSkus(
       seasonHistory,
       plannedUnits,
       plannedValue,
-      // Only meaningful once there is more than one season to be absent from.
-      isNewThisSeason: earliestPeriod !== undefined && seenEarly.size > 0 && !seenEarly.has(key),
+      // Only meaningful once there is an earlier season to be absent from.
+      isNewThisSeason:
+        periods.length > 1 &&
+        latest.historicalPeriod !== earliestPeriod &&
+        firstSeen.get(key) === latest.historicalPeriod,
       basis: {
         kind: override !== undefined ? "planner_override" : growthSource,
         seasonsUsed: ordered.map((r) => r.historicalPeriod),

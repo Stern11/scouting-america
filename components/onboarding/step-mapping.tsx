@@ -77,7 +77,10 @@ export function StepMapping({
             </div>
             <div className="divide-y divide-[var(--border)] rounded-[var(--radius-md)] border border-[var(--border)]">
               {rows.map((res) => (
-                <div key={keyOf(res)} className="flex items-center justify-between gap-4 px-4 py-3">
+                <div
+                  key={keyOf(res)}
+                  className="flex flex-col items-stretch gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
+                >
                   <div className="min-w-0">
                     <p className="text-[13px] text-[var(--text-primary)]">
                       We expected <code className="rounded-[3px] bg-[var(--surface-sunken)] px-1 py-0.5 text-[12px]">{res.expected}</code>
@@ -88,7 +91,7 @@ export function StepMapping({
                     value={selections[keyOf(res)] ?? NOT_IN_FILE}
                     onValueChange={(value) => setSelections((s) => ({ ...s, [keyOf(res)]: value }))}
                   >
-                    <SelectTrigger className="w-[220px] flex-none">
+                    <SelectTrigger className="w-full flex-none sm:w-[220px]">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>

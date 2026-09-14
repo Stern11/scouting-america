@@ -21,12 +21,21 @@ import { NewBadge } from "@/components/shared/new-badge";
 import { SkuImpactDrawer } from "@/components/workspace/sku-impact-drawer";
 import { MaterialDrawer } from "@/components/workspace/material-drawer";
 import { DispositionBadge, DISPOSITION_ORDER, dispositionLabel } from "@/components/shared/state-badge";
-import { HeroMetric, Label, MetricRow, Page, SectionRule } from "@/components/shared/page";
+import { HeroMetric, MetricRow, Page, SectionRule } from "@/components/shared/page";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { upcomingDecisions } from "@/lib/situations/decisions";
 import { applyFilters, filterOptions, type CandidateFilters } from "@/lib/situations/filters";
 import { cn } from "@/lib/utils/cn";
 import { LOAD_BEARING_DISPOSITIONS, type CandidateItem, type ContributorDisposition } from "@/types/situation";
-import { fmtMoney, fmtUnits } from "@/lib/utils/format";
+import { fmtDateShort, fmtMoney, fmtUnits } from "@/lib/utils/format";
+import {
+  deadlineSortValue,
+  deadlineTone,
+  leadTimeLabel,
+  noDeadlineReason,
+  weeksLeftLabel,
+  type DeadlineTone,
+} from "@/lib/situations/deadline";
 
 export default function ReconcilePage({ params }: { params: Promise<{ situationId: string }> }) {
   const { situationId } = use(params);
@@ -54,6 +63,8 @@ export default function ReconcilePage({ params }: { params: Promise<{ situationI
   if (!situation) return <Page>{null}</Page>;
 
   const { bridge } = situation;
+  // Counted the way Decisions lists them, so the two numbers always agree.
+  const openDecisions = upcomingDecisions([situation], { [situationId]: overrides }).length;
 
   // Every item on the same basis grows at the same rate, so the header can
   // state it once. Only omitted when the rows genuinely disagree.
@@ -69,17 +80,29 @@ export default function ReconcilePage({ params }: { params: Promise<{ situationI
       ? `${sharedGrowth > 0 ? "+" : ""}${(sharedGrowth * 100).toFixed(1)}%`
       : undefined;
   const edited = Object.keys(overrides?.dispositions ?? {}).length;
+  const hasWindow = situation.productionWindow !== undefined;
 
   const columns: Column<CandidateItem>[] = [
     {
       key: "item",
       header: "Prior item",
-      width: "26%",
       sortValue: (row) => row.itemName,
       render: (row) => (
-        <div className="min-w-0">
+        // Table cells ignore max-width, so the cap sits on the content: a long
+        // item name truncates instead of widening the whole table.
+        <div className="min-w-0 max-w-[230px] xl:max-w-[280px]">
           <div className="flex items-center gap-2">
-            <span className="truncate font-medium text-[var(--text-primary)]">{row.itemName}</span>
+            <span
+              title={row.itemName}
+              className={cn(
+                "truncate font-medium",
+                row.disposition === "intentional_exit"
+                  ? "text-[var(--text-muted)] line-through"
+                  : "text-[var(--text-primary)]"
+              )}
+            >
+              {row.itemName}
+            </span>
             {row.isNewThisSeason ? <NewBadge /> : null}
           </div>
           <div className="truncate text-[11.5px] text-[var(--text-muted)]">
@@ -90,23 +113,16 @@ export default function ReconcilePage({ params }: { params: Promise<{ situationI
       ),
     },
     {
-      key: "units",
-      header: "Prior units",
-      numeric: true,
-      sortValue: (row) => row.actualUnits,
-      render: (row) => fmtUnits(row.actualUnits),
-    },
-    {
       key: "planned",
-      // The growth rate is one number for the whole basis, so it belongs in
-      // the header once. Printed on every row it was twenty repetitions of a
-      // fact the reader had already taken in, crowding out the per-row figure
-      // that actually differs.
+      // Last year and what carries forward read as one movement, so they share
+      // a column — two numeric columns side by side were most of the width
+      // that pushed the decision control off the edge. The growth rate is one
+      // number for the whole basis, so it belongs in the header once.
       header: (
-        <span>
-          Carries forward
+        <span title="Units last year → units carried forward this year">
+          Units
           {sharedGrowthLabel ? (
-            <span className="ml-1.5 font-normal text-[var(--text-muted)]">{sharedGrowthLabel}</span>
+            <span className="ml-1.5 font-normal normal-case text-[var(--text-muted)]">{sharedGrowthLabel}</span>
           ) : null}
         </span>
       ),
@@ -116,7 +132,8 @@ export default function ReconcilePage({ params }: { params: Promise<{ situationI
         const overridden = row.plannedBasis.kind === "planner_override";
         return (
           <div>
-            <div className="tabular-nums text-[var(--text-primary)]">
+            <div className="whitespace-nowrap tabular-nums text-[var(--text-primary)]">
+              <span className="text-[var(--text-muted)]">{fmtUnits(row.actualUnits)} →</span>{" "}
               {fmtUnits(row.plannedUnits)}
             </div>
             {/* Only what departs from the shared basis earns a second line. */}
@@ -130,7 +147,6 @@ export default function ReconcilePage({ params }: { params: Promise<{ situationI
     {
       key: "coverage",
       header: "In this year's plan",
-      width: "30%",
       render: (row) => {
         const cover = coverageOf(row);
         if (!cover) {
@@ -144,10 +160,14 @@ export default function ReconcilePage({ params }: { params: Promise<{ situationI
           );
         }
         return (
-          <div className="min-w-0">
-            <div className="truncate text-[12.5px] text-[var(--text-primary)]">{cover.name}</div>
+          <div className="min-w-0 max-w-[190px] xl:max-w-[230px]">
+            <div className="truncate text-[12.5px] text-[var(--text-primary)]" title={cover.name}>
+              {cover.name}
+            </div>
+            {/* Prior units already have their own column; the line only
+                needs what the plan carries and how far that is from it. */}
             <div className="truncate text-[11.5px] text-[var(--text-muted)]">
-              {fmtUnits(row.actualUnits)} last year → {fmtUnits(cover.planned)} planned{" "}
+              {fmtUnits(cover.planned)} planned{" "}
               <span
                 className={
                   cover.aligned ? "text-[var(--text-muted)]" : "font-medium text-[var(--risk-warning)]"
@@ -162,9 +182,19 @@ export default function ReconcilePage({ params }: { params: Promise<{ situationI
       },
     },
     {
+      key: "deadline",
+      header: (
+        <span title="The last day to commit: production start minus the lead time of this item's slowest component. Red: overdue or 8 weeks or less · Amber: 9–20 weeks · Green: more than 20 weeks">
+          Deadline
+        </span>
+      ),
+      sortValue: deadlineSortValue,
+      render: (row) => <DeadlineCell row={row} hasWindow={hasWindow} />,
+    },
+    {
       key: "disposition",
       header: "Decision",
-      width: "196px",
+      width: "160px",
       render: (row) => (
         // The row opens the drawer; the decision control must not, or changing
         // a disposition would always be followed by a panel the planner did
@@ -186,7 +216,7 @@ export default function ReconcilePage({ params }: { params: Promise<{ situationI
 
   return (
     <Page>
-      <div className="flex flex-wrap items-end justify-between gap-6 pt-5 sm:gap-8 sm:pt-7">
+      <div className="flex flex-wrap items-end justify-between gap-6 sm:gap-8">
         <HeroMetric
           label="Not represented"
           value={fmtMoney(bridge.unresolvedValue, bridge.currency)}
@@ -260,8 +290,19 @@ export default function ReconcilePage({ params }: { params: Promise<{ situationI
         rowKey={(row) => row.id}
         onRowClick={(row) => setOpenSkuId(row.id)}
         isRowActive={(row) => row.id === openSkuId}
-        rowClassName={(row) => (isSettled(row) ? undefined : "bg-[var(--surface)]")}
-        initialSort={{ key: "planned", direction: "desc" }}
+        rowClassName={(row) =>
+          // An exit is decided and gone — greyed rather than highlighted.
+          row.disposition === "intentional_exit"
+            ? "opacity-60"
+            : isSettled(row)
+              ? undefined
+              : "bg-[var(--surface)]"
+        }
+        // Soonest deadline first: the date is what a planner prioritises by,
+        // and exits and undated rows sort to the bottom rather than crowding
+        // out what is due.
+        initialSort={{ key: "deadline", direction: "asc" }}
+        minWidth={760}
         card={(row) => {
           const cover = coverageOf(row);
           return (
@@ -308,6 +349,17 @@ export default function ReconcilePage({ params }: { params: Promise<{ situationI
                 )}
               </div>
 
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-[var(--text-muted)]">
+                {row.deadline ? (
+                  <>
+                    <span>Deadline</span>
+                    <DeadlineCell row={row} hasWindow={hasWindow} wide />
+                  </>
+                ) : (
+                  <span>No deadline — {noDeadlineReason(row, hasWindow)}</span>
+                )}
+              </div>
+
               <div onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} role="presentation">
                 <DecisionCell
                   candidate={row}
@@ -342,20 +394,95 @@ export default function ReconcilePage({ params }: { params: Promise<{ situationI
         onClose={() => setOpenMaterialId(null)}
       />
 
-      <div className="mt-8 flex items-center justify-between border-t border-[var(--border)] pt-5">
-        <p className="text-[12.5px] text-[var(--text-muted)]">
-          <Label className="mb-1">Next</Label>
-          What {fmtUnits(bridge.validatedUnits, true)} carrying forward commits you to, and by when
-        </p>
+      {/* What this programme's choices commit the planner to is handled on
+          Decisions, with every other programme's — a quiet pointer, not a step. */}
+      <div className="mt-8 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-[var(--border)] pt-4">
+        <span className="text-[12.5px] tabular-nums text-[var(--text-muted)]">
+          {openDecisions === 0
+            ? "No dated decisions yet"
+            : `${openDecisions} decision${openDecisions === 1 ? "" : "s"} this creates`}
+        </span>
         <Link
-          href={`/workspace/${situationId}/decide`}
-          className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] bg-[var(--accent)] px-3.5 py-2 text-[13px] font-medium text-[var(--text-on-accent)] transition-opacity hover:opacity-90"
+          href={`/decisions?programme=${encodeURIComponent(situationId)}`}
+          className="inline-flex items-center gap-1.5 text-[12.5px] font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+          style={{ transitionDuration: "var(--duration-fast)" }}
         >
-          Decide
+          View in Decisions
           <ArrowRight className="size-3.5" />
         </Link>
       </div>
     </Page>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Deadline cells                                                      */
+/* ------------------------------------------------------------------ */
+
+/** Filled soft pills, so the band reads at a glance down the column. */
+const PILL_TONE: Record<DeadlineTone, string> = {
+  critical: "border-[var(--risk-critical)] bg-[var(--risk-critical-soft)] text-[var(--risk-critical)]",
+  warning: "border-[var(--risk-warning)] bg-[var(--risk-warning-soft)] text-[var(--risk-warning)]",
+  positive: "border-[var(--risk-positive)] bg-[var(--risk-positive-soft)] text-[var(--risk-positive)]",
+};
+
+/**
+ * The date and how long is left, with what sets it on a second quiet line. An
+ * exit needs no decision date, so it is struck.
+ *
+ * The component class tag ("PM") that used to sit in its own column is gone:
+ * the abbreviation needed explaining, and the component's own name says more.
+ */
+function DeadlineCell({
+  row,
+  hasWindow,
+  wide = false,
+}: {
+  row: CandidateItem;
+  hasWindow: boolean;
+  /** In a phone card the component name has the full row, not a 150px column. */
+  wide?: boolean;
+}) {
+  if (!row.deadline) {
+    return (
+      <span className="text-[var(--text-muted)]" title={noDeadlineReason(row, hasWindow)}>
+        —
+      </span>
+    );
+  }
+  if (row.disposition === "intentional_exit") {
+    return (
+      <span
+        className="whitespace-nowrap tabular-nums text-[var(--text-muted)] line-through"
+        title="Intentional exit — needs no decision date"
+      >
+        {fmtDateShort(row.deadline.date)}
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex flex-col gap-0.5">
+      <span className="inline-flex items-center gap-2 whitespace-nowrap">
+        <span className="tabular-nums text-[var(--text-primary)]">{fmtDateShort(row.deadline.date)}</span>
+        <span
+          className={cn(
+            "rounded-full border px-1.5 py-[2px] text-[10.5px] font-medium leading-none tabular-nums",
+            PILL_TONE[deadlineTone(row.deadline.weeksAway)]
+          )}
+        >
+          {weeksLeftLabel(row.deadline.weeksAway)}
+        </span>
+      </span>
+      <span
+        className={cn(
+          "block truncate text-[11px] text-[var(--text-muted)]",
+          wide ? "max-w-[240px]" : "max-w-[150px]"
+        )}
+        title={`Set by ${row.deadline.componentName}, which takes ${row.deadline.leadTimeDays} days to arrive`}
+      >
+        {leadTimeLabel(row.deadline.leadTimeDays)} · {row.deadline.componentName}
+      </span>
+    </span>
   );
 }
 
@@ -415,7 +542,7 @@ function DecisionCell({
         <button
           type="button"
           onClick={() => setUnlocked(true)}
-          className="inline-flex items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--border)] px-1.5 py-0.5 text-[11.5px] text-[var(--text-muted)] transition-opacity hover:bg-[var(--interaction-hover)] hover:text-[var(--text-primary)] focus-visible:opacity-100 group-hover:opacity-100 sm:border-transparent sm:opacity-0 [tr:hover_&]:opacity-100"
+          className="inline-flex h-8 items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--border)] px-2 text-[11.5px] sm:h-7 text-[var(--text-muted)] transition-opacity hover:bg-[var(--interaction-hover)] hover:text-[var(--text-primary)] focus-visible:opacity-100 group-hover:opacity-100 sm:border-transparent sm:opacity-0 [tr:hover_&]:opacity-100"
         >
           <Pencil className="size-3" />
           Change
@@ -430,7 +557,7 @@ function DecisionCell({
     <Select value={candidate.disposition} onValueChange={(value) => onChange(value as ContributorDisposition)}>
       <SelectTrigger
         className={cn(
-          "w-[186px]",
+          "w-[152px]",
           needsAttention && "border-[var(--state-inferred)] ring-1 ring-[var(--state-inferred)]/30",
           candidate.disposition === "carry_forward" && "border-[var(--state-validated)]"
         )}

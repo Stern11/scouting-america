@@ -254,9 +254,11 @@ const LEAD_TIME_HISTORY: SheetSpec = {
     c("specification_family", false, "string", "Specification family.", "laminate-7c", { width: 18 }),
     c("plant", false, "string", "Receiving plant.", "PLT-01", { width: 12 }),
     c("system_lead_time_days", false, "integer", "Lead time your system currently assumes, for comparison.", 42, { width: 20, min: 0, aliases: ["planned_lead_time", "system_lead_time"] }),
+    c("promised_date", false, "date", "Delivery date the supplier committed to. Enables on-time delivery.", "2026-04-14", { width: 14, aliases: ["confirmed_date", "committed_date", "promise_date"] }),
+    c("received_qty", false, "number", "Quantity actually received. Enables in-full delivery.", 14000, { width: 13, min: 0, aliases: ["received_quantity", "gr_qty", "delivered_qty"] }),
   ],
   exampleRows: [
-    { material_id: "MAT-FILM", material_name: "Printed film laminate", po_id: "PO-778201", po_date: "2026-02-11", receipt_date: "2026-04-19", quantity: 14000, uom: "kg", supplier_id: "SUP-118", supplier_name: "Northvale Flexibles", material_family: "Printed Film", specification_family: "laminate-7c", plant: "PLT-01", system_lead_time_days: 42 },
+    { material_id: "MAT-FILM", material_name: "Printed film laminate", po_id: "PO-778201", po_date: "2026-02-11", receipt_date: "2026-04-19", quantity: 14000, uom: "kg", supplier_id: "SUP-118", supplier_name: "Northvale Flexibles", material_family: "Printed Film", specification_family: "laminate-7c", plant: "PLT-01", system_lead_time_days: 42, promised_date: "2026-04-14", received_qty: 14000 },
   ],
 };
 
@@ -282,12 +284,12 @@ const INVENTORY_SUPPLY: SheetSpec = {
 const READINESS_HISTORY: SheetSpec = {
   name: "Readiness_History",
   required: false,
-  purpose: "Weekly snapshots of how much of a season's assortment was represented, by weeks before production start.",
+  purpose: "Weekly snapshots of how much of a season's expected value was in the formal plan, by weeks before production start.",
   absentConsequence: "The Overview readiness curve is unavailable — there is no history to show a pace against.",
   columns: [
     c("season_period", true, "string", "Period or program key this snapshot belongs to. Same shape as planning_period — a prior season's rows are what let this year compare to it.", "2027-Halloween", { width: 20, aliases: ["period", "planning_period", "season"] }),
     c("weeks_before_production_start", true, "integer", "How many weeks before that season's production start this snapshot was taken.", 30, { width: 26, min: 0, aliases: ["weeks_before", "weeks_out"] }),
-    c("represented_pct", true, "percent", "Share of that season's eventual assortment represented at this point. 41, 41% and 0.41 all mean 41%.", "41%", { width: 16, aliases: ["represented", "pct_represented", "completeness_pct"] }),
+    c("represented_pct", true, "percent", "Share of that season's expected business value in the formal plan at this point. 41, 41% and 0.41 all mean 41%.", "41%",{ width: 16, aliases: ["represented", "pct_represented", "completeness_pct"] }),
     c("as_of_date", false, "date", "Calendar date the snapshot was taken, for provenance.", "2026-11-02", { width: 14 }),
     c("notes", false, "string", "Free text.", "", { width: 24 }),
   ],
@@ -297,6 +299,28 @@ const READINESS_HISTORY: SheetSpec = {
     { season_period: "2026-Halloween", weeks_before_production_start: 7, represented_pct: "97%", as_of_date: "2026-06-04", notes: "" },
     { season_period: "2027-Halloween", weeks_before_production_start: 44, represented_pct: "21%", as_of_date: "2026-11-23", notes: "" },
     { season_period: "2027-Halloween", weeks_before_production_start: 30, represented_pct: "41%", as_of_date: "2027-03-01", notes: "" },
+  ],
+};
+
+const LINE_HISTORY: SheetSpec = {
+  name: "Line_History",
+  required: false,
+  purpose: "What each line actually did in past months — run hours, downtime, overtime and late material arrivals.",
+  absentConsequence: "Capacity planning shows scheduled hours only, with no history of what lines actually delivered.",
+  columns: [
+    c("period", true, "string", "Past calendar month, YYYY-MM. One row per line per month.", "2026-06", { width: 12, aliases: ["month"] }),
+    c("plant", true, "string", "Plant.", "PLT-01", { width: 12 }),
+    c("line_id", true, "string", "Line identifier. Should match Line_Capacity.", "LINE-03", { width: 13, aliases: ["resource_id", "work_center", "line"] }),
+    c("scheduled_hours", true, "number", "Hours the line was scheduled to run that month.", 560, { width: 16, min: 0, aliases: ["planned_hours", "available_hours"] }),
+    c("run_hours", true, "number", "Hours the line actually ran.", 512, { width: 12, min: 0, aliases: ["actual_hours", "production_hours"] }),
+    c("unplanned_downtime_hours", false, "number", "Breakdowns and stoppages nobody planned.", 31, { width: 24, min: 0, aliases: ["downtime_hours", "unplanned_downtime"] }),
+    c("overtime_hours", false, "number", "Hours worked above the schedule.", 18, { width: 15, min: 0, aliases: ["overtime", "ot_hours"] }),
+    c("late_arrivals", false, "integer", "Material deliveries that reached the line late.", 4, { width: 13, min: 0, aliases: ["late_deliveries", "late_material_arrivals"] }),
+    c("late_arrival_hours_lost", false, "number", "Line hours lost waiting on late deliveries.", 9, { width: 22, min: 0, aliases: ["hours_lost_late_material"] }),
+    c("notes", false, "string", "Free text.", "", { width: 24 }),
+  ],
+  exampleRows: [
+    { period: "2026-06", plant: "PLT-01", line_id: "LINE-03", scheduled_hours: 560, run_hours: 512, unplanned_downtime_hours: 31, overtime_hours: 18, late_arrivals: 4, late_arrival_hours_lost: 9, notes: "" },
   ],
 };
 
@@ -312,6 +336,7 @@ export const WORKBOOK_SCHEMA: readonly SheetSpec[] = [
   LEAD_TIME_HISTORY,
   INVENTORY_SUPPLY,
   READINESS_HISTORY,
+  LINE_HISTORY,
 ];
 
 export function sheetSpec(name: SheetName): SheetSpec {

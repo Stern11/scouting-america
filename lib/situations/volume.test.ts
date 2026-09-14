@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  ambiguousIdentityRows,
   availablePeriods,
   candidateIdFor,
   clampGrowth,
@@ -294,5 +295,84 @@ describe("describeSeasonBasis", () => {
 
   it("says plainly when nothing is selected", () => {
     expect(describeSeasonBasis(rows, [])).toContain("No seasons selected");
+  });
+});
+
+describe("identity — products the attributes alone cannot tell apart", () => {
+  it("keeps two flavours of one base pack as two products", () => {
+    const milk = row({ id: "m", flavorOrVariant: "milk chocolate", actualUnits: 700 });
+    const dark = row({ id: "d", flavorOrVariant: "dark chocolate", actualUnits: 300 });
+    const skus = collapseToSkus([milk, dark], { selectedPeriods: ["2026-Halloween"] });
+    expect(skus).toHaveLength(2);
+    expect(skus.map((s) => s.plannedUnits).sort((a, b) => a - b)).toEqual([300, 700]);
+  });
+
+  it("never drops a row whose attributes collide with another in the same season", () => {
+    const a = row({ id: "a", itemName: "Bag A", actualUnits: 400 });
+    const b = row({ id: "b", itemName: "Bag B", actualUnits: 600 });
+    const skus = collapseToSkus([a, b], { selectedPeriods: ["2026-Halloween"] });
+    expect(skus).toHaveLength(2);
+    expect(skus.reduce((sum, s) => sum + s.plannedUnits, 0)).toBe(1000);
+    expect(new Set(skus.map((s) => s.row.id)).size).toBe(2);
+  });
+
+  it("refines a colliding key in every season, so a product still links to its own history", () => {
+    const a25 = row({ id: "a25", historicalPeriod: "2025-Halloween", itemName: "Bag A", actualUnits: 100 });
+    const b25 = row({ id: "b25", historicalPeriod: "2025-Halloween", itemName: "Bag B", actualUnits: 200 });
+    const a26 = row({ id: "a26", historicalPeriod: "2026-Halloween", itemName: "Bag A", actualUnits: 110 });
+    const skus = collapseToSkus([a25, b25, a26], {
+      selectedPeriods: ["2025-Halloween", "2026-Halloween"],
+    });
+    expect(skus).toHaveLength(2);
+    const bagA = skus.find((s) => s.row.itemName === "Bag A")!;
+    expect(bagA.seasonHistory.map((p) => p.units)).toEqual([100, 110]);
+  });
+
+  it("keeps true duplicate rows apart rather than merging them", () => {
+    const a = row({ id: "a", itemId: "SAME", actualUnits: 5 });
+    const b = row({ id: "b", itemId: "SAME", actualUnits: 7 });
+    expect(collapseToSkus([a, b], { selectedPeriods: ["2026-Halloween"] })).toHaveLength(2);
+  });
+
+  it("reports only the rows it had to tell apart", () => {
+    const colliding = [row({ id: "a", itemName: "X" }), row({ id: "b", itemName: "Y" })];
+    expect(ambiguousIdentityRows(colliding).map((r) => r.id)).toEqual(["a", "b"]);
+    const acrossSeasons = [row({ id: "a" }), row({ id: "b", historicalPeriod: "2025-Halloween" })];
+    expect(ambiguousIdentityRows(acrossSeasons)).toEqual([]);
+  });
+});
+
+describe("collapseToSkus — new this season", () => {
+  const byName = (out: ReturnType<typeof collapseToSkus>) =>
+    new Map(out.map((s) => [s.row.itemName, s.isNewThisSeason]));
+  const seasons = ["2024-Halloween", "2025-Halloween", "2026-Halloween"];
+
+  // A repeat in all three seasons, one first seen in the middle season, and
+  // one first seen in the latest.
+  const rows = [
+    ...seasons.map((p, i) => row({ id: `rep${i}`, historicalPeriod: p, itemName: "Repeat", basePack: "BP-R" })),
+    row({ id: "mid1", historicalPeriod: "2025-Halloween", itemName: "Middle", basePack: "BP-M" }),
+    row({ id: "mid2", historicalPeriod: "2026-Halloween", itemName: "Middle", basePack: "BP-M" }),
+    row({ id: "new", historicalPeriod: "2026-Halloween", itemName: "Launch", basePack: "BP-L" }),
+  ];
+
+  it("is new only when the product has no row in any earlier comparable season", () => {
+    const flags = byName(collapseToSkus(rows, { selectedPeriods: ["2026-Halloween"] }));
+    expect(flags.get("Repeat")).toBe(false);
+    // First ran a season ago: a repeat, even though it is absent from the earliest season.
+    expect(flags.get("Middle")).toBe(false);
+    expect(flags.get("Launch")).toBe(true);
+  });
+
+  it("does not move with the selected basis", () => {
+    const narrow = byName(collapseToSkus(rows, { selectedPeriods: ["2026-Halloween"] }));
+    const wide = byName(collapseToSkus(rows, { selectedPeriods: seasons }));
+    expect(wide).toEqual(narrow);
+  });
+
+  it("is never claimed with a single season of history", () => {
+    const single = rows.filter((r) => r.historicalPeriod === "2026-Halloween");
+    const flags = byName(collapseToSkus(single, { selectedPeriods: ["2026-Halloween"] }));
+    expect([...flags.values()].every((v) => v === false)).toBe(true);
   });
 });

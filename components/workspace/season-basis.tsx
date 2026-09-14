@@ -73,7 +73,7 @@ export function SeasonBasis({
                     : `Add ${period} to the basis`
               }
               className={cn(
-                "inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border px-2.5 py-1 text-[12.5px] tabular-nums transition-colors",
+                "inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-[var(--radius-sm)] border px-2.5 text-[12.5px] tabular-nums transition-colors",
                 active
                   ? "border-[var(--interaction-selected-border)] bg-[var(--interaction-selected)] font-medium text-[var(--text-primary)]"
                   : "border-[var(--border)] text-[var(--text-muted)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]",

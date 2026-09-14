@@ -44,6 +44,11 @@ export function CandidateFilterBar({
   const active = activeFilterCount(filters);
   const totals = filteredTotals(visible);
   const set = (patch: Partial<CandidateFilters>) => onChange({ ...filters, ...patch });
+  // Selects shown in the two-column phone grid (a dimension with one value is
+  // hidden). With an even count the toggle would sit alone in half a row.
+  const selectCount =
+    1 +
+    [options.productFamilies, options.brands, options.customers].filter((items) => items.length > 1).length;
 
   return (
     <div className="mb-4 flex flex-col gap-3">
@@ -87,7 +92,7 @@ export function CandidateFilterBar({
             set({ disposition: v === ANY ? undefined : (v as CandidateFilters["disposition"]) })
           }
         >
-          <SelectTrigger className="h-8 w-full text-[12.5px] sm:w-[168px]">
+          <SelectTrigger className="h-8 w-full text-[12.5px] sm:w-[152px] 2xl:w-[168px]">
             <SelectValue placeholder="Any decision" />
           </SelectTrigger>
           <SelectContent>
@@ -106,6 +111,7 @@ export function CandidateFilterBar({
           aria-pressed={filters.uncoveredOnly ?? false}
           className={cn(
             "h-8 min-w-0 truncate rounded-[var(--radius-sm)] border px-2.5 text-[12.5px] transition-colors",
+            selectCount % 2 === 0 && "col-span-2",
             filters.uncoveredOnly
               ? "border-[var(--interaction-selected-border)] bg-[var(--interaction-selected)] font-medium text-[var(--text-primary)]"
               : "border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
@@ -165,7 +171,9 @@ function FilterSelect({
   if (items.length <= 1) return null;
   return (
     <Select value={value ?? ANY} onValueChange={(v) => onChange(v === ANY ? undefined : v)}>
-      <SelectTrigger className="h-8 w-full text-[12.5px] sm:w-[168px]">
+      {/* 152px until 2xl (xl begins at exactly 1280), so search, four selects and
+          the toggle share one row on a 1280 screen. */}
+      <SelectTrigger className="h-8 w-full text-[12.5px] sm:w-[152px] 2xl:w-[168px]">
         <SelectValue placeholder={`Any ${label.toLowerCase()}`} />
       </SelectTrigger>
       <SelectContent>

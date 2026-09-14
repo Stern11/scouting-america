@@ -50,6 +50,9 @@ export function BusinessToPlanBridge({
 
   const { expectedValue, formalValue, explainedValue, unexplainedValue, currency } = bridge;
   const total = Math.max(expectedValue, formalValue + explainedValue + unexplainedValue, 1);
+  const explainingCount = candidates.filter(
+    (c) => c.disposition !== "already_represented" && c.disposition !== "intentional_exit"
+  ).length;
 
   const segments: Segment[] = [
     {
@@ -67,7 +70,9 @@ export function BusinessToPlanBridge({
       value: explainedValue,
       token: "--state-validated",
       onFill: "var(--text-on-accent)",
-      detail: `${candidates.length} prior-season items could account for this`,
+      // The items the bridge's explained value is summed from — not every prior
+      // item, most of which are already represented.
+      detail: `${explainingCount} prior-season item${explainingCount === 1 ? "" : "s"} could account for this`,
     },
     {
       key: "unexplained",
@@ -81,12 +86,14 @@ export function BusinessToPlanBridge({
 
   // Where the unresolved business actually sits. The bar answers "how much";
   // this answers "where" — the second question a planner asks, and the one
-  // that decides who they go and talk to.
+  // that decides who they go and talk to. Planned value, the same basis as the
+  // "explained" segment above, so the rows are this year's business rather
+  // than last year's actuals beside a this-year bar.
   const byFamily = useMemo(() => {
     const totals = new Map<string, number>();
     for (const c of candidates) {
       if (c.disposition === "already_represented" || c.disposition === "intentional_exit") continue;
-      totals.set(c.productFamily, (totals.get(c.productFamily) ?? 0) + c.actualValue);
+      totals.set(c.productFamily, (totals.get(c.productFamily) ?? 0) + c.plannedValue);
     }
     return [...totals.entries()].map(([family, value]) => ({ family, value })).sort((a, b) => b.value - a.value);
   }, [candidates]);
@@ -95,7 +102,7 @@ export function BusinessToPlanBridge({
 
   return (
     <div className={cn("w-full", className)}>
-      <div className="mb-2 flex items-baseline justify-between">
+      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-0.5">
         <span className="text-[13px] text-[var(--text-secondary)]">
           <span className="font-semibold text-[var(--text-primary)]">{fmtPct(bridge.representedPct)}</span> of{" "}
           {fmtMoney(expectedValue, currency)} expected business is represented
