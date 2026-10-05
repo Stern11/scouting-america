@@ -86,7 +86,7 @@ function TransitionsList() {
         <PageHeader title="SKU Transitions" />
         <NotAvailable
           title="No product transitions found"
-          detail="Add SKU_Transitions rows, or replacement SKUs on the SKU master, so Heizen knows which products belong together."
+          detail="Add SKU_Transitions rows, or replacement SKUs on the SKU master, so the planner knows which products belong together."
         />
       </Page>
     );

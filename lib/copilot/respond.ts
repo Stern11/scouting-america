@@ -221,7 +221,7 @@ function tryAvoidPurchasing(q: string, ctx: CopilotContext): CopilotReply | null
     const value = r.unitCost !== undefined ? ` (${fmtMoney(r.avoidedUnits * r.unitCost, t.currency)} at cost)` : "";
     return reply(
       `${n(r.avoidedUnits)} ${successorLabel(t)} units${value} can be deferred or avoided: ${n(r.usableLegacy)} usable legacy units at ${fmtPct(t.assumptions.substitutabilityPct)} interchangeable. ` +
-        `Ordering as if legacy stock did not exist would mean ${n(r.ignoringLegacyUnits)} units; Heizen recommends ${n(r.recommendedUnits)}.`
+        `Ordering as if legacy stock did not exist would mean ${n(r.ignoringLegacyUnits)} units; the recommendation is ${n(r.recommendedUnits)}.`
     );
   }
   const list = active(ctx).filter((v) => v.replenishment.available);
@@ -286,7 +286,7 @@ function tryWhyOrdering(q: string, ctx: CopilotContext): CopilotReply | null {
       : "";
   const verdict =
     r.finalOrderUnits > 0
-      ? `so Heizen recommends ${n(r.finalOrderUnits)} units — not the ${n(r.ignoringLegacyUnits)} an order ignoring legacy stock would need.`
+      ? `so the recommendation is ${n(r.finalOrderUnits)} units — not the ${n(r.ignoringLegacyUnits)} an order ignoring legacy stock would need.`
       : `so no order is needed today — ignoring legacy stock would have called for ${n(r.ignoringLegacyUnits)}.`;
   return reply(
     `${t.name} needs ${n(r.requirement)} units over ${r.horizonWeeks} weeks (continuity demand plus ${fmtNum1(r.safetyStockWeeks)} weeks' safety stock). ` +

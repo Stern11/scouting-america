@@ -174,7 +174,7 @@ function buildReadmeSheet(workbook: ExcelJS.Workbook): void {
   let r = 1;
 
   const title = ws.getRow(r);
-  title.getCell(1).value = "Heizen SKU Transition Template";
+  title.getCell(1).value = "Scout Shop Planner — SKU Transition Template";
   title.getCell(1).font = { bold: true, size: 16 };
   title.commit();
   r += 2;
@@ -197,7 +197,7 @@ function buildReadmeSheet(workbook: ExcelJS.Workbook): void {
     "2. Paste values under the matching headers on each tab — do not rename or reorder headers.",
     "3. Fill every dark-header (required) column; grey-header (optional) columns may stay blank.",
     "4. Leave the README and Example_Data tabs as reference only — do not add data to them.",
-    "5. Save the file and upload it to Heizen.",
+    "5. Save the file and upload it to the Scout Shop Planner.",
   ];
   for (const line of howTo) {
     addTableRow(ws, r, [line]);
@@ -275,7 +275,7 @@ function buildReadmeSheet(workbook: ExcelJS.Workbook): void {
 
 export async function buildPlanningTemplate(): Promise<ArrayBuffer> {
   const workbook = new ExcelJS.Workbook();
-  workbook.creator = "Heizen";
+  workbook.creator = "Scout Shop Planner";
   workbook.created = new Date();
 
   buildReadmeSheet(workbook);

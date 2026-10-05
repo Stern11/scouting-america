@@ -7,6 +7,7 @@
  * and every configuration decision that can be deferred is deferred.
  */
 
+import { BrandMark } from "@/components/shared/brand-mark";
 import { useRouter } from "next/navigation";
 import { ArrowRight, FileSpreadsheet, RefreshCw, Sparkles } from "lucide-react";
 import { useDatasetStore } from "@/stores/dataset-store";
@@ -38,10 +39,7 @@ export default function StartPage() {
       <div className="w-full max-w-[860px]">
         <div className="mb-10">
           <div className="mb-5 flex items-center gap-2.5">
-            <span className="grid size-6 place-items-center rounded-[5px] bg-[var(--accent)] text-[12px] font-bold text-[var(--text-on-accent)]">
-              H
-            </span>
-            <span className="text-[14px] font-semibold tracking-tight text-[var(--text-primary)]">Heizen</span>
+            <BrandMark />
           </div>
           <h1 className="max-w-[640px] text-[30px] font-semibold leading-tight tracking-[-0.02em] text-[var(--text-primary)]">
             Plan across product transitions, not just individual SKUs.

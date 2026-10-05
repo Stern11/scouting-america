@@ -25,7 +25,7 @@ import { respond, SUGGESTED_QUESTIONS, type CopilotAction, type CopilotContext, 
  */
 export function AiCommandBar({
   className,
-  placeholder = 'Ask Heizen — try "which stores run out before the shipment?"',
+  placeholder = 'Ask a question — try "which shops run out before the shipment?"',
 }: {
   className?: string;
   placeholder?: string;
@@ -111,7 +111,7 @@ export function AiCommandBar({
           onChange={(e) => setValue(e.target.value)}
           onFocus={() => setOpen(true)}
           placeholder={placeholder}
-          aria-label="Ask Heizen"
+          aria-label="Ask a question"
           className="min-w-0 flex-1 bg-transparent text-[13px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)]"
         />
         <VoiceButton onTranscript={(text) => submit(text)} />
@@ -145,7 +145,7 @@ export function AiCommandBar({
       {open && exchanges.length > 0 && (
         <div className="absolute left-0 right-0 top-full z-40 mt-1 max-h-[min(60vh,480px)] overflow-y-auto rounded-[var(--radius-md)] border border-[var(--border-strong)] bg-[var(--surface-elevated)] shadow-lg">
           <div className="sticky top-0 flex items-center justify-between border-b border-[var(--border)] bg-[var(--surface-elevated)] px-3 py-1.5">
-            <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)]">Ask Heizen</span>
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)]">Ask</span>
             <div className="flex items-center gap-0.5">
               <Button variant="ghost" size="icon" aria-label="Clear conversation" title="Clear" onClick={() => setExchanges([])}>
                 <span className="text-[10px]">Clear</span>

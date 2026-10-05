@@ -45,7 +45,7 @@ export function ReplenishmentPanel({ view }: { view: TransitionView }) {
 
         <div className="mt-5 grid grid-cols-3 divide-x divide-[var(--border)] overflow-hidden rounded-[var(--radius-lg)] border border-[var(--border)]">
           <Compare label="Ignoring legacy stock" value={fmtNum(rep.ignoringLegacyUnits)} muted />
-          <Compare label="Heizen recommends" value={fmtNum(rep.finalOrderUnits)} accent />
+          <Compare label="Recommended" value={fmtNum(rep.finalOrderUnits)} accent />
           <Compare
             label="Deferred or avoided"
             value={fmtNum(rep.avoidedUnits)}
@@ -86,7 +86,7 @@ export function ReplenishmentPanel({ view }: { view: TransitionView }) {
             <button
               type="button"
               className="text-[12px] text-[var(--text-muted)] underline underline-offset-4 hover:text-[var(--text-primary)]"
-              onClick={() => decisions.clear(["orderOverrideUnits"], "Order reset to Heizen's recommendation")}
+              onClick={() => decisions.clear(["orderOverrideUnits"], "Order reset to the recommendation")}
             >
               Use recommendation
             </button>

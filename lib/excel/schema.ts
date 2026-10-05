@@ -118,7 +118,7 @@ const SKU_TRANSITIONS: SheetSpec = {
   name: "SKU_Transitions",
   required: false,
   purpose: "Which SKUs are one continuous product. Several SKUs go in one cell, separated by commas.",
-  absentConsequence: "Relationships come from the SKU master's replacement column and Heizen's suggestions, which you confirm.",
+  absentConsequence: "Relationships come from the SKU master's replacement column and automatic matches, which you confirm.",
   columns: [
     c("transition_id", true, "string", "Your identifier for the transition.", "TR-001", { width: 12, aliases: ["id", "transition"] }),
     c("transition_name", true, "string", "What planners call the product.", "Cub Scout Uniform Shirt", { width: 28, aliases: ["name", "product", "description"] }),
@@ -202,7 +202,7 @@ const CURRENT_PLAN: SheetSpec = {
   name: "Current_Plan",
   required: false,
   purpose: "What JDA currently forecasts and plans to order, per SKU.",
-  absentConsequence: "The JDA-versus-Heizen comparison is not shown.",
+  absentConsequence: "The comparison with JDA's plan is not shown.",
   columns: [
     c("sku_id", true, "string", "SKU.", "CS-2841", { width: 12, aliases: ["sku", "item"] }),
     c("horizon_start", true, "date", "Start of the plan window.", "2026-10-05", { width: 14, aliases: ["from_date", "start_date"] }),
@@ -219,7 +219,7 @@ const SELLING_PROFILES: SheetSpec = {
   name: "Selling_Profiles",
   required: false,
   purpose: "JDA selling profiles: which stores each SKU is set up to sell in. One row per SKU per store.",
-  absentConsequence: "Heizen cannot tell which stores JDA will replenish with the successor.",
+  absentConsequence: "The planner cannot tell which stores JDA will replenish with the successor.",
   columns: [
     c("profile_id", true, "string", "Profile identifier.", "PRF-CS-NAT", { width: 14, aliases: ["profile"] }),
     c("sku_id", true, "string", "SKU.", "CS-2841", { width: 12, aliases: ["sku", "item"] }),
@@ -233,7 +233,7 @@ const TRANSITION_HISTORY: SheetSpec = {
   name: "Transition_History",
   required: false,
   purpose: "Past planner decisions on a transition, kept beside it.",
-  absentConsequence: "Only decisions made in Heizen appear in a transition's history.",
+  absentConsequence: "Only decisions made in the planner appear in a transition's history.",
   columns: [
     c("date", true, "date", "When.", "2026-10-03", { width: 12 }),
     c("transition_id", true, "string", "Transition.", "TR-001", { width: 12 }),

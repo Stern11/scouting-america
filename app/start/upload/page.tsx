@@ -8,6 +8,7 @@
  * browser via `validateWorkbook` — the workbook is never sent anywhere.
  */
 
+import { BrandMark } from "@/components/shared/brand-mark";
 import { useCallback, useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
@@ -197,10 +198,7 @@ export default function UploadPage() {
       <div className="mx-auto w-full max-w-[960px]">
         <div className="mb-9 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <span className="grid size-6 place-items-center rounded-[5px] bg-[var(--accent)] text-[12px] font-bold text-[var(--text-on-accent)]">
-              H
-            </span>
-            <span className="text-[14px] font-semibold tracking-tight text-[var(--text-primary)]">Heizen</span>
+            <BrandMark />
           </div>
           <div className="flex items-center gap-4">
             <button

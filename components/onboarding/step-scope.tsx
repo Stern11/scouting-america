@@ -30,7 +30,7 @@ export function StepScope({
   return (
     <div>
       <p className="max-w-[560px] text-[13px] leading-relaxed text-[var(--text-secondary)]">
-        Here&apos;s what Heizen found in your workbook before it starts planning your transitions.
+        Here&apos;s what we found in your workbook before it starts planning your transitions.
       </p>
 
       <div className="mt-6">
@@ -41,7 +41,7 @@ export function StepScope({
               value: scope.plannedTransitionCount.toLocaleString(),
               sub:
                 scope.suggestedTransitionCount > 0
-                  ? `${scope.suggestedTransitionCount} matched by Heizen — you confirm them`
+                  ? `${scope.suggestedTransitionCount} matched automatically — you confirm them`
                   : `${scope.explicitTransitionCount.toLocaleString()} from SKU_Transitions`,
             },
             { label: "SKUs", value: scope.skuCount.toLocaleString() },
@@ -57,7 +57,7 @@ export function StepScope({
       {scope.plannedTransitionCount === 0 ? (
         <p className="mt-6 max-w-[560px] text-[12.5px] text-[var(--text-secondary)]">
           No transitions found. Add a SKU_Transitions sheet, fill replacement_sku_id on the SKU master, or mark
-          legacy SKUs DISCONTINUED so Heizen can match them to their successors.
+          legacy SKUs DISCONTINUED so they can be matched to their successors.
         </p>
       ) : null}
 

@@ -1,44 +1,49 @@
 "use client";
 
 /**
- * Actions — what does the planner need to do next?
+ * Actions — what do I do this week?
  *
- * One queue across every transition, most urgent first. Each item carries its
- * reasons and its arithmetic; approving or dismissing it is recorded with who
- * and when, and confirming a successor or closing out legacy changes the plan
- * itself, so every page moves with it.
+ * A to-do board, not a report. One sentence says how much there is and how
+ * much is urgent; three columns sort the work by what the planner is doing —
+ * keeping shops stocked, buying the right amount, tidying up — each most
+ * urgent first. Every card is one instruction, one reason, two buttons.
+ * Approving is recorded with who and when; confirming a match or closing out
+ * a product changes the plan itself, so every page moves with it.
  */
 
 import { Suspense, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { RotateCcw } from "lucide-react";
+import { CheckCircle2, ChevronDown, ClipboardCheck, RotateCcw, ShoppingCart, Store, X } from "lucide-react";
 import { useDataset } from "@/components/dataset/dataset-provider";
 import { useDatasetStore } from "@/stores/dataset-store";
 import { useCurrentUser } from "@/components/layout/use-current-user";
-import { MetricRow, NotAvailable, Page, PageHeader, SectionRule } from "@/components/shared/page";
-import { ACTION_TYPE_LABEL, QueueItem } from "@/components/actions/queue-item";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Page } from "@/components/shared/page";
+import { ActionCard } from "@/components/actions/action-card";
 import { openActions } from "@/lib/transitions/portfolio";
-import { PRIORITY_ORDER } from "@/lib/transitions/actions";
-import type { ActionPriority, ActionType, PlannerAction } from "@/types/transition";
+import { ACTION_GROUPS, ACTION_TYPE_LABEL, actionGroup, type ActionGroup } from "@/lib/transitions/action-groups";
+import type { ActionType, PlannerAction } from "@/types/transition";
 import { cn } from "@/lib/utils/cn";
-import { fmtDateShort, fmtMoney, fmtNum } from "@/lib/utils/format";
+import { fmtDateShort } from "@/lib/utils/format";
 
-const PRIORITIES: ActionPriority[] = ["CRITICAL", "HIGH", "MEDIUM", "MONITOR"];
-const PRIORITY_LABEL: Record<ActionPriority, string> = { CRITICAL: "Critical", HIGH: "High", MEDIUM: "Medium", MONITOR: "Monitor" };
-/** Short names the Overview links with. */
+/** Short names other pages link with. */
 const TYPE_ALIASES: Record<string, ActionType> = { confirm: "CONFIRM_SUCCESSOR", transfer: "TRANSFER_INVENTORY", hold: "HOLD_REPLENISHMENT" };
-const ALL = "__all";
+const GROUP_ICON: Record<ActionGroup, typeof Store> = { stock: Store, buy: ShoppingCart, tidy: ClipboardCheck };
+const GROUP_TONE: Record<ActionGroup, string> = {
+  stock: "bg-[var(--risk-critical-soft)] text-[var(--risk-critical)]",
+  buy: "bg-[var(--accent-soft)] text-[var(--accent)]",
+  tidy: "bg-[var(--risk-positive-soft)] text-[var(--risk-positive)]",
+};
+const VISIBLE = 4;
 
 export default function ActionsPage() {
   return (
     <Suspense fallback={<Page>{null}</Page>}>
-      <ActionQueue />
+      <ActionBoard />
     </Suspense>
   );
 }
 
-function ActionQueue() {
+function ActionBoard() {
   const { dataset, transitions } = useDataset();
   const actionStates = useDatasetStore((s) => s.actionStates);
   const auditLog = useDatasetStore((s) => s.auditLog);
@@ -50,207 +55,203 @@ function ActionQueue() {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [showHistory, setShowHistory] = useState(false);
 
   const focus = params.get("focus");
   const rawType = params.get("type");
   const typeFilter = rawType ? (TYPE_ALIASES[rawType] ?? (rawType as ActionType)) : undefined;
-  const priorityFilter = params.get("priority") as ActionPriority | null;
-  const [openId, setOpenId] = useState<string | null>(focus);
 
+  const byId = useMemo(() => new Map(transitions.map((t) => [t.id, t])), [transitions]);
   const all = useMemo(() => transitions.flatMap((t) => t.actions), [transitions]);
-  const queue = useMemo(() => openActions(transitions, actionStates), [transitions, actionStates]);
-  const shown = queue.filter((a) => (!typeFilter || a.type === typeFilter) && (!priorityFilter || a.priority === priorityFilter));
+  const queue = useMemo(
+    () => openActions(transitions, actionStates).filter((a) => a.priority !== "MONITOR" && (!typeFilter || a.type === typeFilter)),
+    [transitions, actionStates, typeFilter]
+  );
   const handled = all.filter((a) => actionStates[a.id]);
-
-  const counts = useMemo(() => {
-    const c: Record<ActionPriority, number> = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, MONITOR: 0 };
-    for (const a of queue) c[a.priority] += 1;
-    return c;
-  }, [queue]);
-
-  const atStake = useMemo(() => {
-    const urgent = queue.filter((a) => a.priority === "CRITICAL" || a.priority === "HIGH");
-    return {
-      stores: urgent.reduce((n, a) => n + (a.type === "TRANSFER_INVENTORY" || a.type === "REPLENISH_SUCCESSOR" || a.type === "ACCELERATE_INBOUND" ? (a.storesAffected ?? 0) : 0), 0),
-      value: urgent.reduce((n, a) => n + (a.valueAtStake ?? 0), 0),
-    };
-  }, [queue]);
+  const urgent = queue.filter((a) => a.priority === "CRITICAL").length;
+  const thisWeek = queue.filter((a) => a.priority === "CRITICAL" || a.priority === "HIGH").length;
 
   const history = useMemo(() => {
     const names = new Map(transitions.map((t) => [t.id, t.name]));
     const fromData = (dataset?.history ?? []).map((h) => ({ id: h.id, at: h.date, actor: h.actor, text: h.text, transitionId: h.transitionId }));
     return [...fromData, ...auditLog]
       .sort((a, b) => b.at.localeCompare(a.at))
-      .slice(0, 14)
       .map((e) => ({ ...e, transitionName: names.get(e.transitionId) ?? e.transitionId }));
   }, [auditLog, dataset, transitions]);
 
   if (!dataset) return null;
-  const currency = dataset.metadata.currency;
-
-  const setParam = (key: string, value: string | undefined) => {
-    const next = new URLSearchParams(params.toString());
-    next.delete("focus");
-    if (!value || value === ALL) next.delete(key);
-    else next.set(key, value);
-    router.replace(`${pathname}${next.toString() ? `?${next}` : ""}`, { scroll: false });
-  };
 
   const note = (text: string) => ({ actor, text, at: new Date().toISOString() });
-
   const approve = (a: PlannerAction) => {
     // Some approvals change the plan itself, not just the queue.
     if (a.type === "CONFIRM_SUCCESSOR") {
-      setOverride(a.transitionId, { relationshipDecision: "CONFIRMED" }, note(`Confirmed ${a.summary.split(" · ")[0]} for ${a.transitionName}`));
+      setOverride(a.transitionId, { relationshipDecision: "CONFIRMED" }, note(`Confirmed the replacement for ${a.transitionName}`));
     } else if (a.type === "MARK_LEGACY_DEPLETION") {
       setOverride(a.transitionId, { closed: true }, note(`Closed out ${a.transitionName} — old stock is gone`));
     } else {
       setActionState(a.id, a.transitionId, { disposition: "DONE", at: new Date().toISOString() }, note(`Approved: ${a.title}`));
     }
-    setOpenId(null);
   };
-  const dismiss = (a: PlannerAction) => {
-    setActionState(a.id, a.transitionId, { disposition: "DISMISSED", at: new Date().toISOString() }, note(`Dismissed: ${a.title}`));
-    setOpenId(null);
+  const dismiss = (a: PlannerAction) =>
+    setActionState(a.id, a.transitionId, { disposition: "DISMISSED", at: new Date().toISOString() }, note(`Not now: ${a.title}`));
+  const clearType = () => {
+    const next = new URLSearchParams(params.toString());
+    next.delete("type");
+    router.replace(`${pathname}${next.toString() ? `?${next}` : ""}`, { scroll: false });
   };
-
-  const types = [...new Set(queue.map((a) => a.type))];
 
   return (
     <Page>
-      <PageHeader title="Actions" subtitle="What to do next, across every transition — most urgent first" />
+      {/* ---------------- the situation ---------------- */}
+      <div className="flex flex-wrap items-end justify-between gap-4 pb-6">
+        <div>
+          <h1 className="text-[26px] font-semibold leading-tight tracking-[-0.02em] text-[var(--text-primary)] sm:text-[30px]">
+            {queue.length === 0 ? (
+              "You're all caught up."
+            ) : (
+              <>
+                {thisWeek} thing{thisWeek === 1 ? "" : "s"} to do this week
+                {urgent > 0 ? <span className="text-[var(--risk-critical)]"> — {urgent} urgent</span> : null}
+              </>
+            )}
+          </h1>
+          <p className="mt-1.5 text-[14px] text-[var(--text-secondary)]">
+            {queue.length - thisWeek > 0 ? `Plus ${queue.length - thisWeek} for later this cycle. ` : ""}
+            Approve what you agree with — say &ldquo;not now&rdquo; to the rest.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--surface)] px-4 py-2 text-[13px] text-[var(--text-secondary)]">
+          <CheckCircle2 className="size-4 text-[var(--risk-positive)]" />
+          <span className="font-semibold tabular-nums text-[var(--text-primary)]">{handled.length}</span> decided so far
+        </div>
+      </div>
 
-      <MetricRow
-        className="border-y border-[var(--border)] py-4"
-        items={[
-          { label: "Critical", value: fmtNum(counts.CRITICAL), tone: counts.CRITICAL > 0 ? "critical" : "muted", sub: "stockouts or overdue orders" },
-          { label: "High", value: fmtNum(counts.HIGH), tone: counts.HIGH > 0 ? "warning" : "muted", sub: "this week" },
-          { label: "Medium", value: fmtNum(counts.MEDIUM), sub: "this cycle" },
-          { label: "Stores protected", value: fmtNum(atStake.stores), sub: "if critical and high are done" },
-          { label: "Value in play", value: atStake.value > 0 ? fmtMoney(atStake.value, currency) : "—", sub: "orders, holds and stock at cost" },
-        ]}
-      />
+      {typeFilter ? (
+        <button
+          type="button"
+          onClick={clearType}
+          className="mb-4 inline-flex items-center gap-1.5 rounded-full bg-[var(--accent-soft)] px-3 py-1 text-[12.5px] font-medium text-[var(--accent)]"
+        >
+          Showing only: {ACTION_TYPE_LABEL[typeFilter]} <X className="size-3" />
+        </button>
+      ) : null}
 
-      <div className="mt-5 grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,1fr)_300px]">
-        <section>
-          <div className="mb-3 flex flex-wrap items-center gap-1.5">
-            <Chip active={!priorityFilter} onClick={() => setParam("priority", undefined)}>
-              All · {queue.length}
-            </Chip>
-            {PRIORITIES.map((p) => (
-              <Chip key={p} active={priorityFilter === p} onClick={() => setParam("priority", p)}>
-                {PRIORITY_LABEL[p]} · {counts[p]}
-              </Chip>
-            ))}
-            <Select value={typeFilter ?? ALL} onValueChange={(v) => setParam("type", v)}>
-              <SelectTrigger className="ml-auto min-w-[170px]" aria-label="Action type">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL}>Any action</SelectItem>
-                {types.map((t) => (
-                  <SelectItem key={t} value={t}>
-                    {ACTION_TYPE_LABEL[t]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {shown.length === 0 ? (
-            <NotAvailable
-              title={queue.length === 0 ? "No transitions require attention." : "Nothing matches this filter."}
-              detail={
-                queue.length === 0
-                  ? "All active product transitions have sufficient inventory coverage based on current demand and inbound supply."
-                  : undefined
-              }
-            />
-          ) : (
-            <ul className="border-y border-[var(--border)]">
-              {[...shown]
-                .sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority] || a.rank - b.rank)
-                .map((a) => (
-                  <QueueItem
-                    key={a.id}
-                    action={a}
-                    open={openId === a.id}
-                    onToggle={() => setOpenId(openId === a.id ? null : a.id)}
-                    onApprove={() => approve(a)}
-                    onDismiss={() => dismiss(a)}
-                    currency={currency}
-                  />
-                ))}
-            </ul>
-          )}
-
-          {handled.length > 0 ? (
-            <>
-              <SectionRule label={`Handled · ${handled.length}`} />
-              <ul className="divide-y divide-[var(--border)] border-y border-[var(--border)]">
-                {handled.map((a) => {
-                  const state = actionStates[a.id];
-                  return (
-                    <li key={a.id} className="flex items-center justify-between gap-3 px-2 py-2 text-[13px]">
-                      <span className="min-w-0 truncate text-[var(--text-secondary)]">
-                        <span className={state?.disposition === "DONE" ? "text-[var(--risk-positive)]" : "text-[var(--text-muted)]"}>
-                          {state?.disposition === "DONE" ? "Approved" : "Dismissed"}
-                        </span>{" "}
-                        · {a.title} <span className="text-[var(--text-muted)]">· {a.transitionName}</span>
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => reopenAction(a.id, a.transitionId, note(`Reopened: ${a.title}`))}
-                        className="inline-flex flex-none items-center gap-1 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                      >
-                        <RotateCcw className="size-3" /> Reopen
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </>
-          ) : null}
-        </section>
-
-        <aside>
-          <SectionRule label="Decision history" />
-          {history.length === 0 ? (
-            <p className="text-[13px] text-[var(--text-muted)]">No decisions recorded yet.</p>
-          ) : (
-            <ol className="space-y-3">
-              {history.map((e) => (
-                <li key={e.id} className="text-[12.5px] leading-snug">
-                  <div className="text-[11.5px] tabular-nums text-[var(--text-muted)]">
-                    {fmtDateShort(e.at)} · {e.transitionName}
+      {/* ---------------- the board ---------------- */}
+      {queue.length === 0 ? (
+        <div className="rounded-[18px] border border-[var(--border)] bg-[var(--surface)] p-8 text-center">
+          <CheckCircle2 className="mx-auto size-8 text-[var(--risk-positive)]" />
+          <p className="mt-3 text-[15px] font-medium text-[var(--text-primary)]">No transitions require attention.</p>
+          <p className="mt-1 text-[13px] text-[var(--text-secondary)]">
+            Every active product has enough usable stock for current demand and the deliveries on the way.
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
+          {ACTION_GROUPS.map((g) => {
+            const items = queue.filter((a) => actionGroup(a) === g.key);
+            const Icon = GROUP_ICON[g.key];
+            const focusIndex = focus ? items.findIndex((a) => a.id === focus) : -1;
+            const showAll = expanded[g.key] || focusIndex >= VISIBLE;
+            const visible = showAll ? items : items.slice(0, VISIBLE);
+            return (
+              <section key={g.key} className="flex flex-col">
+                <div className="mb-3 flex items-center gap-2.5">
+                  <span className={cn("grid size-9 place-items-center rounded-full", GROUP_TONE[g.key])}>
+                    <Icon className="size-[18px]" />
+                  </span>
+                  <div className="min-w-0">
+                    <h2 className="text-[15.5px] font-semibold text-[var(--text-primary)]">
+                      {g.title} <span className="font-normal text-[var(--text-muted)]">{items.length}</span>
+                    </h2>
+                    <p className="truncate text-[12px] text-[var(--text-muted)]">{g.blurb}</p>
                   </div>
-                  <div className="text-[var(--text-secondary)]">
-                    <span className="font-medium text-[var(--text-primary)]">{e.actor}</span> · {e.text}
-                  </div>
+                </div>
+                <div className="flex flex-col gap-3">
+                  {items.length === 0 ? (
+                    <p className="rounded-[14px] border border-dashed border-[var(--border)] px-4 py-6 text-center text-[13px] text-[var(--text-muted)]">
+                      Nothing here right now.
+                    </p>
+                  ) : (
+                    visible.map((a) => {
+                      const t = byId.get(a.transitionId);
+                      return (
+                        <ActionCard
+                          key={a.id}
+                          action={a}
+                          category={t?.category ?? ""}
+                          status={t?.status ?? "MONITOR"}
+                          focused={a.id === focus}
+                          onApprove={() => approve(a)}
+                          onDismiss={() => dismiss(a)}
+                        />
+                      );
+                    })
+                  )}
+                  {items.length > VISIBLE ? (
+                    <button
+                      type="button"
+                      onClick={() => setExpanded((e) => ({ ...e, [g.key]: !showAll }))}
+                      className="inline-flex items-center justify-center gap-1 rounded-[12px] border border-[var(--border)] bg-[var(--surface)] py-2 text-[13px] font-medium text-[var(--accent)] hover:border-[var(--accent)]"
+                    >
+                      {showAll ? "Show fewer" : `Show ${items.length - VISIBLE} more`}
+                      <ChevronDown className={cn("size-3.5 transition-transform", showAll && "rotate-180")} />
+                    </button>
+                  ) : null}
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ---------------- the record ---------------- */}
+      <section className="mt-12">
+        <button
+          type="button"
+          onClick={() => setShowHistory((v) => !v)}
+          aria-expanded={showHistory}
+          className="flex items-center gap-2 text-[15px] font-semibold text-[var(--text-primary)]"
+        >
+          Recently decided <span className="font-normal text-[var(--text-muted)]">{history.length}</span>
+          <ChevronDown className={cn("size-4 text-[var(--text-muted)] transition-transform", showHistory && "rotate-180")} />
+        </button>
+        {showHistory ? (
+          <div className="mt-3 grid grid-cols-1 gap-x-10 lg:grid-cols-2">
+            <ol className="divide-y divide-[var(--border)] border-y border-[var(--border)]">
+              {history.slice(0, 12).map((e) => (
+                <li key={e.id} className="grid grid-cols-[80px_minmax(0,1fr)] gap-3 py-2.5 text-[13px]">
+                  <span className="tabular-nums text-[var(--text-muted)]">{fmtDateShort(e.at)}</span>
+                  <span className="text-[var(--text-secondary)]">
+                    <span className="font-medium text-[var(--text-primary)]">{e.transitionName}</span> · {e.text}
+                  </span>
                 </li>
               ))}
             </ol>
-          )}
-        </aside>
-      </div>
+            {handled.length > 0 ? (
+              <ul className="divide-y divide-[var(--border)] border-y border-[var(--border)]">
+                {handled.map((a) => (
+                  <li key={a.id} className="flex items-center justify-between gap-3 py-2.5 text-[13px]">
+                    <span className="min-w-0 truncate text-[var(--text-secondary)]">
+                      <span className={actionStates[a.id]?.disposition === "DONE" ? "text-[var(--risk-positive)]" : "text-[var(--text-muted)]"}>
+                        {actionStates[a.id]?.disposition === "DONE" ? "Approved" : "Not now"}
+                      </span>{" "}
+                      · {a.title}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => reopenAction(a.id, a.transitionId, note(`Reopened: ${a.title}`))}
+                      className="inline-flex flex-none items-center gap-1 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                    >
+                      <RotateCcw className="size-3" /> Undo
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
     </Page>
-  );
-}
-
-function Chip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "rounded-full border px-3 py-1 text-[12.5px] tabular-nums transition-colors",
-        active
-          ? "border-[var(--interaction-selected-border)] bg-[var(--interaction-selected)] font-medium text-[var(--text-primary)]"
-          : "border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--interaction-hover)]"
-      )}
-      style={{ transitionDuration: "var(--duration-fast)" }}
-    >
-      {children}
-    </button>
   );
 }

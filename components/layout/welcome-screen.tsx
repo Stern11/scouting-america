@@ -18,6 +18,7 @@
  * provider later means populating the same store from a callback.
  */
 
+import { BrandMark } from "@/components/shared/brand-mark";
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowRightLeft, LogIn, ShieldCheck, Store } from "lucide-react";
@@ -57,19 +58,14 @@ function Welcome() {
         {/* ---------------- the promise ---------------- */}
         <div>
           <div className="mb-7 flex items-center gap-2.5">
-            <span className="grid size-7 place-items-center rounded-[6px] bg-[var(--accent)] text-[13px] font-bold text-[var(--text-on-accent)]">
-              H
-            </span>
-            <span className="text-[15px] font-semibold tracking-tight text-[var(--text-primary)]">
-              Heizen
-            </span>
+            <BrandMark size={32} />
           </div>
 
           <h1 className="max-w-[520px] text-[28px] font-semibold leading-[1.15] tracking-[-0.025em] text-[var(--text-primary)] sm:text-[36px]">
             Plan across product transitions, not just individual SKUs.
           </h1>
           <p className="mt-4 max-w-[520px] text-[15px] leading-relaxed text-[var(--text-secondary)]">
-            JDA sees an old SKU and a new one. Your business sees the same shirt. Heizen plans them as
+            JDA sees an old SKU and a new one. Your business sees the same shirt. This planner treats them as
             one continuous product — demand, inventory and replenishment.
           </p>
 

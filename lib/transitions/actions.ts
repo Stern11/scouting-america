@@ -104,7 +104,7 @@ export function generateTransitionActions(input: ActionInput): PlannerAction[] {
       summary: `${legacyIds} → ${successorIds} · confidence ${lineage.confidence.toLowerCase()} · ${lineage.matchedCount} matching, ${lineage.changedCount} changed`,
       reasons: [
         lineage.source === "SUGGESTED"
-          ? "JDA records no replacement for the legacy SKU; Heizen matched it on product attributes."
+          ? "JDA records no replacement for the legacy SKU; it was matched on product attributes."
           : "The relationship has not been confirmed by a planner.",
         ...lineage.evidence
           .filter((e) => e.attribute !== "SKU ID" && e.verdict !== "unknown")
@@ -113,7 +113,7 @@ export function generateTransitionActions(input: ActionInput): PlannerAction[] {
         blocking ? "Replenishment and store coverage below assume this relationship holds." : "",
       ].filter(Boolean),
       calculation: [],
-      impact: "Until confirmed, legacy history and stock are carried on Heizen's match.",
+      impact: "Confirm it and the old sales and stock count toward the new SKU for certain.",
       rank: 50,
     });
   }
@@ -158,7 +158,7 @@ export function generateTransitionActions(input: ActionInput): PlannerAction[] {
         { label: "Units moved between stores", value: units(coverage.transferUnits) },
         { label: "Donor floor", value: `${input.thresholds.donorFloorWeeks} wks` },
       ],
-      impact: `Covers ${recipients.size} store${recipients.size === 1 ? "" : "s"} with stock that already exists — no purchase needed.`,
+      impact: `Keeps ${recipients.size} Scout Shop${recipients.size === 1 ? "" : "s"} stocked with ${noun(2)} you already own — nothing new to buy.`,
       rank: soonest ? daysFrom(now, soonest) : 30,
     });
   }
@@ -189,7 +189,7 @@ export function generateTransitionActions(input: ActionInput): PlannerAction[] {
         { label: "Sent to at-risk stores", value: units(coverage.replenishFromDcUnits), op: "−" },
         { label: "Left at DC", value: units(Math.max(0, inventory.dc.successor - coverage.replenishFromDcUnits)), op: "=" },
       ],
-      impact: `Prevents stockouts at ${n} store${n === 1 ? "" : "s"} using stock already on hand.`,
+      impact: `Keeps ${n} Scout Shop${n === 1 ? "" : "s"} from running out, using stock already in the DC.`,
       rank: coverage.earliestStockout ? daysFrom(now, coverage.earliestStockout) + 1 : 31,
     });
   }
@@ -223,7 +223,7 @@ export function generateTransitionActions(input: ActionInput): PlannerAction[] {
         { label: "Covered by transfers + DC", value: units(coverage.atRiskCount - n), op: "−" },
         { label: "Still at risk", value: units(n), op: "=", emphasis: true },
       ],
-      impact: "Pulling the shipment in, or splitting it to ship part early, closes the gap.",
+      impact: "Ask the vendor to ship early, or ship part of the order first.",
       rank: 0,
     });
   }
@@ -264,8 +264,8 @@ export function generateTransitionActions(input: ActionInput): PlannerAction[] {
       calculation: replenishmentLines(rep),
       impact:
         rep.avoidedUnits > 0
-          ? `${units(rep.avoidedUnits)} units deferred or avoided versus ordering as if the legacy stock did not exist.`
-          : undefined,
+          ? `${units(rep.avoidedUnits)} fewer than ordering as if the old-logo ${noun(2)} didn't exist.`
+          : `Enough to cover the next ${rep.horizonWeeks} weeks plus safety stock.`,
       rank: weeksToOrder !== null ? Math.round(weeksToOrder * 7) : 60,
     });
   }
@@ -302,7 +302,7 @@ export function generateTransitionActions(input: ActionInput): PlannerAction[] {
         { label: "Total usable supply", value: units(usableNow + rep.eligibleInbound), op: "=" },
         { label: "Coverage", value: weeks(coverWeeks), emphasis: true },
       ],
-      impact: "Purchasing deferred — working capital preserved while legacy stock sells through.",
+      impact: `Old-logo ${noun(2)} will sell instead — money stays free until they run down.`,
       rank: 40,
     });
   }
@@ -333,7 +333,7 @@ export function generateTransitionActions(input: ActionInput): PlannerAction[] {
           { label: "Continuity demand, same window", value: units(continuity) },
           { label: "Difference", value: `${diff > 0 ? "+" : ""}${units(diff)}`, op: "=", emphasis: true },
         ],
-        impact: "Store replenishment in JDA follows its forecast — correcting it stops the next shortfall at source.",
+        impact: "JDA restocks shops from its forecast — fixing it stops the next shortage at the source.",
         rank: 45,
       });
     }
@@ -364,7 +364,7 @@ export function generateTransitionActions(input: ActionInput): PlannerAction[] {
         { label: `Sold in ${st.sellThroughWeeks} weeks`, value: units(st.legacyUnits - st.remainingUnits), op: "−" },
         { label: "Remaining", value: units(st.remainingUnits), op: "=", emphasis: true },
       ],
-      impact: "Moving legacy to stores that sell it, or holding successor orders, reduces what is stranded.",
+      impact: `Move them to shops that still sell them, or hold new orders, so fewer are left over.`,
       rank: 55,
     });
   }
@@ -386,7 +386,7 @@ export function generateTransitionActions(input: ActionInput): PlannerAction[] {
       skuId: lineage.predecessors[0]?.skuId,
       reasons: ["Legacy inventory is zero at the DC and in every store.", `${fmtPct(input.progress)} of recent sales are on the successor.`],
       calculation: [],
-      impact: "Marks the transition complete.",
+      impact: "Marks this switch as complete.",
       rank: 90,
     });
   }
@@ -506,7 +506,7 @@ export function deriveHeadline(input: {
         ? `${fmtNum(input.sellThrough.remainingUnits)} ${versionLabels(lineage.reason, lineage.successors, lineage.predecessors).oldAdjective} ${noun} won't sell in time.`
         : `Old stock covers ${fmtNum1(inv.networkWeeksOfCover ?? 0)} weeks — the new order can wait.`;
     case "UNCONFIRMED":
-      return `Heizen matched the new ${lineage.successors.map((x) => productName(x)).join(" + ")} to the ${lineage.predecessors.map((x) => productName(x)).join(" + ")}. Is that the right replacement?`;
+      return `We matched the new ${lineage.successors.map((x) => productName(x)).join(" + ")} to the ${lineage.predecessors.map((x) => productName(x)).join(" + ")}. Is that the right replacement?`;
     case "FORECAST_GAP":
       return `JDA's forecast for new ${noun} misses what the old ones still sell.`;
     default:

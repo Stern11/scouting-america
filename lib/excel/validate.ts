@@ -186,7 +186,7 @@ const CAPABILITY_MESSAGES: readonly CapabilityGap[] = [
     key: "currentPlan",
     sheet: "Current_Plan",
     code: "capability_current_plan_unavailable",
-    message: "Add Current_Plan to compare JDA's plan with Heizen's view.",
+    message: "Add Current_Plan to compare JDA's plan with the recommended view.",
   },
   {
     key: "sellingProfiles",

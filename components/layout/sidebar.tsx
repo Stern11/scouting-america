@@ -18,6 +18,7 @@
  * as one space instead of two.
  */
 
+import { BrandIcon, BrandMark } from "@/components/shared/brand-mark";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -75,15 +76,7 @@ export function Sidebar({
           collapsed ? "justify-center px-0" : "gap-2.5 px-4"
         )}
       >
-        <span className="grid size-6 flex-none place-items-center rounded-[5px] bg-[var(--accent)] text-[12px] font-bold text-[var(--text-on-accent)]">
-          H
-        </span>
-        {!collapsed ? (
-          <span className="min-w-0 leading-tight">
-            <span className="block truncate text-[14px] font-semibold tracking-tight text-[var(--text-primary)]">Heizen</span>
-            <span className="block truncate text-[10.5px] text-[var(--text-muted)]">Scout Shop planning</span>
-          </span>
-        ) : null}
+        {collapsed ? <BrandIcon size={28} /> : <BrandMark />}
       </div>
 
       <nav className={cn("flex-1 pt-2", collapsed ? "px-2" : "px-2.5")}>

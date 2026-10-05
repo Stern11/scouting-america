@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Heizen | SKU Transition Intelligence",
+  title: "Scout Shop Planner | Scouting America",
   description: "Plan across product transitions, not just individual SKUs — continuity demand, network inventory and replenishment across legacy and successor SKUs.",
 };
 

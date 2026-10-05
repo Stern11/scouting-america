@@ -61,7 +61,7 @@ export function InventoryPanel({ view }: { view: TransitionView }) {
           </tbody>
         </table>
         <p className="mt-2 text-[12px] leading-snug text-[var(--text-muted)]">
-          Usable = legacy × substitutability + successor. Combined is shown for reference only — it is not what Heizen plans
+          Usable = legacy × substitutability + successor. Combined is shown for reference only — it is not what the plan uses
           against.
           {inv.networkWeeksOfCover !== null ? ` On-hand usable stock covers ${fmtNum1(inv.networkWeeksOfCover)} weeks of demand.` : ""}
         </p>

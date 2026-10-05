@@ -32,7 +32,7 @@ const VERDICT: Record<AttributeVerdict, { label: string; className: string; icon
 const SOURCE_LABEL = {
   PLANNER: "Defined in SKU_Transitions",
   SYSTEM: "Recorded in JDA as the replacement",
-  SUGGESTED: "Matched by Heizen — JDA records no replacement",
+  SUGGESTED: "Matched automatically — JDA records no replacement",
 } as const;
 
 const DECISION_LABEL: Record<RelationshipDecision, string> = {
