@@ -17,7 +17,13 @@ import { scopedKey } from "@/lib/utils/storage-scope";
 const DB_NAME = "heizen";
 const DB_VERSION = 1;
 const STORE = "datasets";
-const ACTIVE_KEY = "active-upload";
+/**
+ * Versioned: the first product generation stored a different dataset shape
+ * under "active-upload". A new key means an old workbook is never read back
+ * as if it were transition data; it is deleted instead.
+ */
+const ACTIVE_KEY = "active-upload-v2";
+const LEGACY_ACTIVE_KEY = "active-upload";
 const PROBE_KEY = "write-probe";
 
 function supported(): boolean {
@@ -131,9 +137,17 @@ export async function saveUploadedDataset(dataset: PlanningDataset): Promise<boo
 export async function loadUploadedDataset(): Promise<PlanningDataset | null> {
   const key = scopedKey(ACTIVE_KEY);
   if (key === null) return null;
+  const legacy = scopedKey(LEGACY_ACTIVE_KEY);
+  if (legacy !== null) await withStore<unknown>("readwrite", (s) => s.delete(legacy), null);
   const stored = await withStore<PlanningDataset | null>("readonly", (s) => s.get(key), null);
-  if (stored) return stored;
+  if (stored && isTransitionDataset(stored)) return stored;
   return inMemory?.key === key ? inMemory.dataset : null;
+}
+
+/** A guard against anything stored under the key that is not this model. */
+function isTransitionDataset(value: unknown): value is PlanningDataset {
+  const v = value as Partial<PlanningDataset> | null;
+  return Boolean(v && Array.isArray(v.stores) && Array.isArray(v.skus) && Array.isArray(v.sales) && v.metadata);
 }
 
 /** Removes the signed-in account's workbook, durable and in-memory. */
@@ -151,6 +165,7 @@ export async function clearUploadedDataset(): Promise<void> {
  */
 export async function clearUnscopedUpload(): Promise<void> {
   await withStore<unknown>("readwrite", (s) => s.delete(ACTIVE_KEY), null);
+  await withStore<unknown>("readwrite", (s) => s.delete(LEGACY_ACTIVE_KEY), null);
 }
 
 /** Whether this browser exposes IndexedDB at all. See `probePersistence` for whether it keeps writes. */

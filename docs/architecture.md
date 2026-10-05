@@ -1,131 +1,97 @@
-# V2 architecture — unresolved planning
+# Architecture — SKU Transition Intelligence
 
-V2 narrows the product from "planning gap intelligence across every supply-chain
-problem" to one job: **help a planner manage future business that is not yet
-represented at item level in the formal planning stack.**
+> Plan across product transitions, not just individual SKUs.
 
-> Plan what your formal plan cannot see yet.
+JDA models items. The business plans demand. When a legacy SKU is replaced,
+those stop being the same thing — this product is the continuity layer that
+puts them back together.
 
 ## The two input adapters
 
-Everything the product shows is derived from a single normalized model. There is
-exactly one planning engine, and it does not know where its data came from.
+Everything the product shows is derived from one normalized model. There is
+one planning engine, and it does not know where its data came from.
 
 ```
-generateDemoRawInput(seed)          parseWorkbook(.xlsx)
-        │                                   │
-        │                           planColumnMapping / applyMapping
-        │                                   │
-        └──────────► normalizePlanningInput() ◄──────┘
-                              │
-                       PlanningDataset            (types/dataset.ts)
-                              │
-                    buildSituations(dataset, overrides)
-                              │
-                      PlanningSituation[]         (types/situation.ts)
-                              │
-                          components/*
+generateDemoRawInput(seed, planningNow)     parseWorkbook(.xlsx)
+              │                                     │
+              │                         planColumnMapping / applyMapping
+              └──────────► normalizePlanningInput() ◄┘
+                                   │
+                            PlanningDataset             (types/dataset.ts)
+                                   │
+          buildTransitions(dataset, { overrides, scenario })
+                                   │
+                            TransitionView[]            (types/transition.ts)
+                                   │
+                              components/*
 ```
 
-`lib/dataset/adapter-parity.test.ts` writes the demo dataset out as a real
-`.xlsx`, reads it back through the upload path, and asserts the resulting
-`PlanningDataset` and every derived situation are identical. That test is what
-keeps the two adapters honest.
+`lib/dataset/adapter-parity.test.ts` writes the demo out as a real `.xlsx`,
+reads it back through the upload path, and asserts the derived transitions
+are identical. A future JDA extract adapter only has to produce the same raw
+rows.
 
-## Layers
+## Workbook sheets (`lib/excel/schema.ts`)
 
-| Path | Responsibility |
+Required: `Stores`, `SKU_Master`, `Sales_History`, `Inventory`.
+Optional: `SKU_Transitions`, `Inbound_Supply`, `Current_Plan` (JDA forecast +
+planned order), `Selling_Profiles`, `Transition_History`. Each absent sheet
+turns off one capability (`DatasetCapabilities`) and the UI says so.
+
+## The calculation chain (`lib/transitions/*`, pure)
+
+| Module | Answers |
 | --- | --- |
-| `types/dataset.ts` | The normalized input model. Rows shaped like a planner's export. |
-| `lib/excel/schema.ts` | The canonical workbook contract. Drives template generation, the README, parsing, validation and column mapping — one source of truth so what we hand out and what we accept cannot drift. |
-| `lib/excel/template.ts` | Builds the `.xlsx` template (ExcelJS, **Node only** — served by `app/api/planning-template`). Never import into a client component. |
-| `lib/excel/parse.ts` `validate.ts` `column-mapping.ts` | Reads an uploaded workbook (SheetJS, browser-safe). Parsing happens client-side; workbook contents never leave the browser. |
-| `lib/dataset/coerce.ts` | Cell coercion: Excel serials, `Date`s, ISO/US strings, `1,234`, `(1,234)`, `90` / `90%` / `0.9`. |
-| `lib/dataset/normalize.ts` | The one funnel. Derives `availableHours` and `actualLeadTimeDays`; drops and reports rows it cannot make valid. |
-| `lib/dataset/issues.ts` | Planner-facing problems. Raw parser errors never reach the UI. |
-| `lib/dataset/demo/generate.ts` | The seeded demo adapter. Deterministic — same seed, same dataset. |
-| `lib/situations/matching.ts` | Configurable attribute matching, one-to-one assignment, and the explanation of *why* something matched. |
-| `lib/situations/build.ts` | Assembles situations: bridge, capacity, materials, runway, state. |
-| `lib/situations/scenario.ts` | Applies scenario overrides to a **copy** of the dataset. |
-| `stores/dataset-store.ts` | Mode, active dataset, planner dispositions. |
-| `lib/situations/portfolio.ts` `horizon.ts` `readiness-curve.ts` | Overview: portfolio roll-up (optionally for one production month), the missing-items timeline, and the value-based readiness pace. |
-| `lib/situations/demand-plan.ts` | Scenario Lab demand planning: brand-level last year vs target vs formal plan, and how much missing-item revenue explains the gap. |
-| `lib/situations/capacity-plan.ts` `pull-forward.ts` | Scenario Lab capacity planning at plant → line → month grain: caps, extra shifts, pull-forward, brand × pack allocation, line history. |
-| `lib/situations/decisions.ts` | Decisions: dated orders, line-load and undecided-product decisions, blocked components and the committed log — derived from situations, never registered. |
-| `lib/situations/suppliers.ts` `deadline.ts` | Supplier comparison (lead time ± P10–P90 spread, OTIF) for releasing an order; item deadline urgency. |
-| `stores/situation-scenario-store.ts` | Demand scenario overrides only — never a derived number. |
-| `stores/capacity-scenario-store.ts` | Capacity scenario overrides (plant-wide, not per programme). |
+| `lineage.ts` | Which SKUs are one product (explicit rows → JDA replacement field → Heizen suggestion), attribute-by-attribute evidence, confidence, the planner's relationship decision. |
+| `sales.ts` | Units in any window, prorated by overlap. Network rows are authoritative; store rows only say where. |
+| `demand.ts` | Continuity demand: legacy × transferred + successor → trend → seasonality → horizon. Never double counts; splits one-to-many by shares. |
+| `inventory.ts` | Network inventory by location; usable legacy = legacy × substitutability; eligible inbound inside the horizon. |
+| `coverage.ts` | Store weeks of cover, stockout dates, at-risk vs next resupply, then the plan: transfers (donor floor, recipient cap, legacy first, same region first), DC replenishment, residual. |
+| `replenishment.ts` | Requirement − usable supply, never negative; the ignoring-legacy comparison; weekly projection, needed-by and order-by dates. |
+| `actions.ts` | Derived planner actions with priority rules, reasons and calculation lines; status and headline. |
+| `assumptions.ts` | Layering: default ← dataset ← planner override ← scenario; thresholds. |
+| `build.ts` | Assembles `TransitionView`s. |
+| `portfolio.ts` | Overview roll-ups and the measured vs illustrative network impact. |
+| `scenario.ts` | Simulator: baseline vs scenario metrics; what can be adopted. |
+| `explain.ts` / `filters.ts` | "How this was calculated" lines; list filters. |
 
-## Optional history sheets
+The horizon is vendor lead time + a 4-week review cycle. "Recent" means the
+last 8 weeks. Thresholds: shortage 2 wks, target 4, excess 8, donor floor 4,
+DC→store 1 week.
 
-- `Readiness_History` is measured in **value**: the share of a season's
-  expected business value in the formal plan at each weekly snapshot. Today's
-  point on the readiness curve is `bridge.representedPct`, the same measure, so
-  this year's line and last year's pace compare like for like.
-- `Lead_Time_History` optionally carries `promised_date` and `received_qty`.
-  With them a receipt can be judged on time and in full (OTIF); without them
-  those figures are not shown — lead time still is.
-- `Line_History` records what each line actually did in past months — run
-  hours against scheduled hours, unplanned downtime, overtime and late material
-  arrivals. Capacity planning reads it to show demonstrated capacity beside the
-  planned hours. Absent, capacity shows planned hours only and says so.
+## State
 
-## Sign-in
+- `stores/dataset-store.ts` — mode, seed/upload, **planner overrides per
+  transition, action dispositions, audit log**. No derived numbers.
+- `stores/scenario-store.ts` — simulator lever drafts and saved scenarios.
+  Adjustments only.
+- Both persist per signed-in account (`stores/storage-scope.ts`).
 
-A shared demo account (Auth.js credentials provider, `auth.ts`) for now. Google
-sign-in is commented out in `auth.ts` and `components/layout/welcome-screen.tsx`
-and can be restored there. Identity still comes only from the Auth.js session,
-so storage scoping is unchanged.
+## Pages
 
-## The workspace flow
+| Route | Question |
+| --- | --- |
+| `/overview` | Where do we have transition risk, and what is it worth? |
+| `/transitions` | Which transitions need me, and why? |
+| `/transitions/[id]` | Lineage → demand → inventory → stores → replenishment → actions for one product. |
+| `/simulator` | What changes if demand, timing or assumptions change? |
+| `/actions` | What do I do next? |
 
-**Reconcile → Decisions.** A programme in the Planning Workspace is one view,
-Reconcile. There is no per-programme Decide step: carrying an item forward or
-exiting it changes the situation, and the decisions that follow (order-by
-dates, line load, products still undecided) appear on Decisions by
-derivation. Decisions shows every programme, or one via `?programme=`; the
-old `/workspace/{id}/decide` route redirects there.
+Old routes (`/workspace`, `/scenario-lab`, `/decisions`) redirect.
 
-## The coherence rule
+## Ask Heizen
 
-Every downstream number derives from one figure: **the units the planner has
-validated as carrying forward** (`bridge.validatedUnits`). Capacity hours,
-material requirements and decision dates all read from it. Change one
-disposition on Reconcile and the capacity matrix, the material list and the
-runway all move together — that is what makes the pages reconcile.
+`lib/copilot/respond.ts` is deterministic and grounded only in the
+`TransitionView`s on screen. What-if questions write simulator drafts, never
+the baseline, and report baseline → scenario deltas.
 
-Only `carry_forward` bears load. `already_represented` is already in the formal
-plan, `intentional_exit` is deliberately gone, and `under_review` has not been
-decided — counting any of them would overstate the plan.
+## Demo dataset (`lib/dataset/demo/*`)
 
-## What remains from V1
-
-Nothing. The last module, V1's `reconcileProvisional()`, backed a what-if
-panel on Decisions that no planner action fed into, and went with it.
-Double-count prevention is structural instead: a prior item matched to a plan
-item becomes `already_represented` and bears no load
-(`lib/situations/matching.ts`).
-
-The rest of V1 — the `/gaps` routes, the V1 Scenario Lab, the
-`data/synthetic/*` input adapter, the rest of `lib/planning-engine/*`, and the
-AI tool/copilot layer built on them — was removed once nothing in the running
-app could reach it. The "Ask Heizen" bar answers through `lib/copilot/*`,
-grounded in the same `PlanningSituation`s the page on screen renders.
-
-## Rules that still hold
-
-- No planning calculation inside a React component.
-- No `Math.random()` and no `Date.now()` in data generation — everything derives
-  from a seed and from `dataset.metadata.planningNow`.
-- A scenario override never mutates the baseline, and a derived result is never
-  persisted.
-- Planner decisions and scenario values are keyed by situation. A candidate id
-  names a product, and a product can run in more than one programme — never
-  flatten them into one candidate-keyed map.
-- Planning data in the browser is scoped to the signed-in account
-  (`lib/utils/storage-scope.ts`); nothing is read or written until one is bound.
-- Risk tokens (positive/warning/critical) and planning-state tokens
-  (formal/validated/inferred/scenario/historical/unknown) stay structurally
-  separate. See the header of `app/globals.css`.
-- Never fabricate precision. A missing sheet degrades one analysis and says so;
-  it never produces a plausible-looking placeholder.
+120 stores, ~150 transitions (~44 active). Showcase transitions cover each
+planning situation: under-ordering + imbalance (Cub Scout Uniform Shirt,
+CS-1048 → CS-2841), over-ordering (Webelos Belt), imbalance (Pinewood Derby
+Car Kit, a split for Scouts BSA Uniform Pants), unconfirmed matches (Scouts
+BSA Hat and two more), delayed inbound (Wolf Neckerchief), a consolidation, a
+discontinuation and a new product. Store stock is designed in weeks of cover
+against the demand the engine itself computes, so the story is true by
+construction. All dates are offsets from `planningNow`.

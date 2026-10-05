@@ -19,7 +19,7 @@ describe("buildPlanningTemplate", () => {
   });
 
   it("exposes the expected filename constant", () => {
-    expect(TEMPLATE_FILENAME).toBe("heizen-planning-template.xlsx");
+    expect(TEMPLATE_FILENAME).toBe("heizen-sku-transition-template.xlsx");
   });
 
   it("has every expected tab, in the right order", async () => {
@@ -28,7 +28,7 @@ describe("buildPlanningTemplate", () => {
     expect(workbook.SheetNames).toEqual(expectedOrder);
   });
 
-  it("gives each of the 8 input tabs exactly the schema headers in order, and zero data rows", async () => {
+  it("gives each input tab exactly the schema headers in order, and zero data rows", async () => {
     const { workbook } = await build();
 
     for (const spec of WORKBOOK_SCHEMA) {

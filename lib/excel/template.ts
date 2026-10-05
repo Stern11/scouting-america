@@ -3,7 +3,7 @@
  *
  * Entirely driven by `WORKBOOK_SCHEMA` (lib/excel/schema.ts) so the template
  * a planner downloads and the parser/validator that reads it back can never
- * drift apart. The 8 input tabs carry the header row only — example data
+ * drift apart. The input tabs carry the header row only — example data
  * must never be uploadable as if it were real (V2 §25) — so every filled
  * example row lives on its own `Example_Data` tab instead.
  */
@@ -11,7 +11,7 @@
 import ExcelJS from "exceljs";
 import { sheetSpec, WORKBOOK_SCHEMA, type ColumnSpec, type ColumnType, type SheetSpec } from "@/lib/excel/schema";
 
-export const TEMPLATE_FILENAME = "heizen-planning-template.xlsx";
+export const TEMPLATE_FILENAME = "heizen-sku-transition-template.xlsx";
 
 const REQUIRED_HEADER_FILL: ExcelJS.Fill = {
   type: "pattern",
@@ -28,6 +28,16 @@ const OPTIONAL_HEADER_FILL: ExcelJS.Fill = {
 const HEADER_FONT: Partial<ExcelJS.Font> = { bold: true, color: { argb: "FFFFFFFF" } };
 
 const DEFAULT_COLUMN_WIDTH = 16;
+/**
+ * ExcelJS supports range-level data validation at runtime but leaves it out
+ * of its typings; per-cell validation over 20,000 rows would bloat the file.
+ */
+interface RangeValidations {
+  dataValidations: { add(range: string, validation: ExcelJS.DataValidation): void };
+}
+
+/** How far down dropdown validation reaches — well past any realistic paste. */
+const VALIDATION_ROWS = 20000;
 
 function numberFormatFor(type: ColumnType, name: string): string | undefined {
   switch (type) {
@@ -38,9 +48,9 @@ function numberFormatFor(type: ColumnType, name: string): string | undefined {
     case "integer":
       return "#,##0";
     case "number":
-      // Per-unit quantities need decimal precision (e.g. quantity_per_parent
-      // 0.0182 kg); everything else is a whole-ish unit/hour/value figure.
-      return /qty_per|quantity_per|per_unit|per_parent/i.test(name) ? "0.####" : "#,##0";
+      // Money and weeks need decimals (unit_cost 14.60, 2.5 weeks); everything
+      // else is a whole unit count.
+      return /cost|price|weeks/i.test(name) ? "#,##0.00" : "#,##0";
     default:
       return undefined;
   }
@@ -74,6 +84,19 @@ function buildInputSheet(workbook: ExcelJS.Workbook, spec: SheetSpec): void {
     if (!format) return;
     const column = ws.getColumn(idx + 1);
     column.numFmt = format;
+  });
+
+  // Enum and yes/no columns get a dropdown, so a planner picks a value the
+  // parser accepts instead of discovering a typo on upload. Blank stays legal.
+  spec.columns.forEach((col, idx) => {
+    const values = col.type === "boolean" ? ["Y", "N"] : col.type === "enum" ? col.enumValues : undefined;
+    if (!values?.length) return;
+    const letter = ws.getColumn(idx + 1).letter;
+    (ws as unknown as RangeValidations).dataValidations.add(`${letter}2:${letter}${VALIDATION_ROWS}`, {
+      type: "list",
+      allowBlank: true,
+      formulae: [`"${values.join(",")}"`],
+    });
   });
 
   ws.autoFilter = {
@@ -151,7 +174,7 @@ function buildReadmeSheet(workbook: ExcelJS.Workbook): void {
   let r = 1;
 
   const title = ws.getRow(r);
-  title.getCell(1).value = "Heizen Planning Template";
+  title.getCell(1).value = "Heizen SKU Transition Template";
   title.getCell(1).font = { bold: true, size: 16 };
   title.commit();
   r += 2;
@@ -160,7 +183,7 @@ function buildReadmeSheet(workbook: ExcelJS.Workbook): void {
     ws,
     r,
     [
-      "This workbook is filled in by pasting exports from your planning systems (SAP, Kinaxis, or similar), then uploaded back into Heizen.",
+      "This workbook is filled in by pasting exports from JDA MMS (store list, SKU master, sales, inventory, open POs), plus one sheet JDA cannot produce: which legacy SKUs and successor SKUs are the same product. It is read in your browser and never sent anywhere.",
     ],
     { wrap: true }
   );
@@ -170,7 +193,7 @@ function buildReadmeSheet(workbook: ExcelJS.Workbook): void {
   sectionHeadingCell(ws, r, "How to use");
   r += 1;
   const howTo = [
-    "1. Export the relevant data from your planning system(s).",
+    "1. Export stores, the SKU master, sales, inventory and open POs from JDA MMS for the SKUs that are transitioning.",
     "2. Paste values under the matching headers on each tab — do not rename or reorder headers.",
     "3. Fill every dark-header (required) column; grey-header (optional) columns may stay blank.",
     "4. Leave the README and Example_Data tabs as reference only — do not add data to them.",
@@ -186,9 +209,12 @@ function buildReadmeSheet(workbook: ExcelJS.Workbook): void {
   sectionHeadingCell(ws, r, "Conventions");
   r += 1;
   const conventions = [
-    "Dates: write as YYYY-MM-DD (e.g. 2027-08-16).",
+    "Dates: write as YYYY-MM-DD (e.g. 2026-10-05).",
     "Numbers: enter plainly, no text or units in the cell (e.g. 12000, not \"12,000 units\").",
     "Percentages: 90, 90% or 0.9 are all read as 90%.",
+    "Several SKUs in one cell (SKU_Transitions): separate them with commas, e.g. CS-1048, CS-1049.",
+    "Yes/no columns: Y or N.",
+    "Sales: any period length works — weekly, monthly, or one row per store for a recent window. Leave store_id blank for network totals.",
     "Blanks are allowed in optional (grey-header) columns; required (dark-header) columns must be filled.",
     "Do not rename or reorder the header row on any tab.",
     "Do not add data to the README or Example_Data tabs — they are reference only.",

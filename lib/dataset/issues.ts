@@ -11,16 +11,15 @@ export type IssueSeverity = "error" | "warning" | "info";
 
 /** Logical sheet names. Also the tab names in the generated workbook. */
 export const SHEET_NAMES = [
-  "Business_Plan",
+  "Stores",
+  "SKU_Master",
+  "SKU_Transitions",
+  "Sales_History",
+  "Inventory",
+  "Inbound_Supply",
   "Current_Plan",
-  "Historical_Items",
-  "BOM",
-  "Line_Capacity",
-  "Item_Line_Mapping",
-  "Lead_Time_History",
-  "Inventory_Supply",
-  "Readiness_History",
-  "Line_History",
+  "Selling_Profiles",
+  "Transition_History",
 ] as const;
 
 export type SheetName = (typeof SHEET_NAMES)[number];

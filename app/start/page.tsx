@@ -43,20 +43,23 @@ export default function StartPage() {
             </span>
             <span className="text-[14px] font-semibold tracking-tight text-[var(--text-primary)]">Heizen</span>
           </div>
-          <h1 className="text-[30px] font-semibold leading-tight tracking-[-0.02em] text-[var(--text-primary)]">
-            Plan what your formal plan cannot see yet.
+          <h1 className="max-w-[640px] text-[30px] font-semibold leading-tight tracking-[-0.02em] text-[var(--text-primary)]">
+            Plan across product transitions, not just individual SKUs.
           </h1>
-          <p className="mt-2 max-w-[560px] text-[14px] leading-relaxed text-[var(--text-secondary)]">
-            Reconcile unresolved future business, see what can already be planned, and understand the material
-            and capacity impact before the finished item exists.
+          <p className="mt-2 max-w-[600px] text-[14px] leading-relaxed text-[var(--text-secondary)]">
+            Connect legacy and replacement products, carry demand history forward, reconcile inventory across your
+            network, and know what to replenish before stockouts or excess inventory appear.
+          </p>
+          <p className="mt-3 text-[12.5px] text-[var(--text-muted)]">
+            Built for product transitions across JDA and your store network.
           </p>
         </div>
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Choice
             icon={<Sparkles className="size-4" />}
-            title="Explore with demo data"
-            body="See the full workflow with a realistic synthetic planning dataset."
+            title="Explore Scouting America demo"
+            body="A synthetic 120-store network mid-rebrand: legacy and Scouting America SKUs selling side by side."
             cta="Start exploring"
             onClick={startDemo}
             primary
@@ -64,7 +67,7 @@ export default function StartPage() {
           <Choice
             icon={<FileSpreadsheet className="size-4" />}
             title="Use your own data"
-            body="Download the Excel template, paste in your planning data, and upload it."
+            body="Download the template, paste in your JDA exports — SKUs, stores, sales, inventory — and upload it."
             cta="Set up your data"
             onClick={() => router.push("/start/upload")}
           />

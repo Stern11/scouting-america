@@ -223,7 +223,7 @@ export default function UploadPage() {
           Use your own data
         </h1>
         <p className="mt-1.5 text-[13px] text-[var(--text-secondary)]">
-          Five short steps. Everything happens in this browser.
+          Five short steps from your JDA exports to a transition plan. Everything happens in this browser — nothing is uploaded anywhere.
         </p>
 
         <div className="mt-8">

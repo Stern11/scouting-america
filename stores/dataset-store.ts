@@ -2,26 +2,32 @@
  * Which dataset the product is looking at, and what the planner has decided
  * about it.
  *
- * Deliberately holds no derived planning numbers — situations are recomputed
- * from (dataset + overrides) on read, the same rule the scenario store follows.
+ * Deliberately holds no derived planning numbers — transitions are rebuilt
+ * from (dataset + overrides) on every read. What lives here are decisions:
+ * a confirmed successor, a substitutability the planner set, an action they
+ * marked done — each logged, so the trail of who changed what survives.
+ *
  * Demo mode persists only its seed; an uploaded dataset lives in IndexedDB
  * (see `lib/dataset/storage.ts`) because it is far too large for web storage.
  */
 
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import type {
-  ContributorDisposition,
-  MatchConfig,
-  MaterialRelease,
-  SituationOverrides,
-  VolumeCommitment,
-} from "@/types/situation";
+import type { ActionState, AuditEntry, TransitionOverrides } from "@/types/transition";
 import type { DatasetMode } from "@/types/dataset";
 import { scopedWebStorage } from "./persist-storage";
 import { DEFAULT_DEMO_SEED } from "@/lib/dataset/demo/generate";
 
 export const DATASET_STORAGE_KEY = "heizen.dataset";
+
+/** A planner decision as the trail records it. */
+export interface DecisionNote {
+  actor: string;
+  /** "Confirmed CS-1048 → CS-2841". */
+  text: string;
+  /** Real time the decision was made — this is an event, not planning data. */
+  at: string;
+}
 
 export interface DatasetStoreState {
   /** Null until the planner has chosen a mode — drives the first-run screen. */
@@ -36,9 +42,12 @@ export interface DatasetStoreState {
   /** True once an uploaded dataset is known to be in IndexedDB, not just held in this tab. */
   hasStoredUpload: boolean;
 
-  activeSituationId: string | null;
-  /** Planner dispositions, keyed by situation id. */
-  overridesBySituation: Record<string, SituationOverrides>;
+  /** Planner decisions about each transition's baseline. */
+  overridesByTransition: Record<string, TransitionOverrides>;
+  /** What the planner did with each action, keyed by action id. */
+  actionStates: Record<string, ActionState>;
+  /** Every decision, newest last. */
+  auditLog: AuditEntry[];
 
   hasHydrated: boolean;
   setHasHydrated: (value: boolean) => void;
@@ -49,36 +58,37 @@ export interface DatasetStoreState {
   chooseUpload: (input: { fileName: string; uploadedAt: string; datasetName: string; stored: boolean }) => void;
   clearDataset: () => void;
 
-  setActiveSituation: (id: string | null) => void;
-  setDisposition: (situationId: string, candidateId: string, disposition: ContributorDisposition) => void;
-  setDispositions: (situationId: string, dispositions: Record<string, ContributorDisposition>) => void;
-  resetDispositions: (situationId: string) => void;
-  setMatchConfig: (situationId: string, config: MatchConfig | undefined) => void;
-  /** Which historical periods form the planning basis for one situation. */
-  setSeasonBasis: (situationId: string, periods: string[] | undefined) => void;
-  /** Commits a scenario volume as a governed provisional assumption. */
-  commitVolume: (situationId: string, commitment: VolumeCommitment) => void;
-  /** Records that a component has been released for ordering. */
-  releaseMaterial: (situationId: string, release: MaterialRelease) => void;
-  undoMaterialRelease: (situationId: string, materialId: string) => void;
-  releaseCommitment: (situationId: string, candidateId: string) => void;
+  /** Merges a decision into a transition's overrides and logs it. */
+  setOverride: (transitionId: string, patch: TransitionOverrides, note: DecisionNote) => void;
+  /** Removes overrides — back to what the data says. */
+  clearOverrides: (transitionId: string, keys: (keyof TransitionOverrides)[], note: DecisionNote) => void;
+  setActionState: (actionId: string, transitionId: string, state: ActionState, note: DecisionNote) => void;
+  reopenAction: (actionId: string, transitionId: string, note: DecisionNote) => void;
 }
 
-const emptyOverrides = (): SituationOverrides => ({ dispositions: {} });
+let auditSeq = 0;
+function audit(transitionId: string, note: DecisionNote): AuditEntry {
+  auditSeq += 1;
+  return { id: `audit-${note.at}-${auditSeq}`, at: note.at, actor: note.actor, transitionId, text: note.text };
+}
+
+/** Switching source invalidates every decision made against the old one. */
+const freshDecisions = () => ({ overridesByTransition: {}, actionStates: {}, auditLog: [] as AuditEntry[] });
 
 export const useDatasetStore = create<DatasetStoreState>()(
   persist(
     (set) => ({
       mode: null,
       datasetId: "demo",
-      datasetName: "Demo planning data",
+      datasetName: "Scouting America demo",
       seed: DEFAULT_DEMO_SEED,
       uploadedFileName: null,
       uploadedAt: null,
       hasStoredUpload: false,
 
-      activeSituationId: null,
-      overridesBySituation: {},
+      overridesByTransition: {},
+      actionStates: {},
+      auditLog: [],
 
       hasHydrated: false,
       setHasHydrated: (value) => set({ hasHydrated: value }),
@@ -88,12 +98,10 @@ export const useDatasetStore = create<DatasetStoreState>()(
           mode: "DEMO",
           seed: seed ?? state.seed,
           datasetId: `demo:${seed ?? state.seed}`,
-          datasetName: "Demo planning data",
+          datasetName: "Scouting America demo",
           uploadedFileName: null,
           uploadedAt: null,
-          // Switching source invalidates every decision made against the old one.
-          overridesBySituation: {},
-          activeSituationId: null,
+          ...(state.mode === "DEMO" && (seed ?? state.seed) === state.seed ? {} : freshDecisions()),
         })),
 
       regenerateDemo: (seed) =>
@@ -101,9 +109,8 @@ export const useDatasetStore = create<DatasetStoreState>()(
           mode: "DEMO",
           seed,
           datasetId: `demo:${seed}`,
-          datasetName: "Demo planning data",
-          overridesBySituation: {},
-          activeSituationId: null,
+          datasetName: "Scouting America demo",
+          ...freshDecisions(),
         }),
 
       chooseUpload: ({ fileName, uploadedAt, datasetName, stored }) =>
@@ -114,8 +121,7 @@ export const useDatasetStore = create<DatasetStoreState>()(
           uploadedFileName: fileName,
           uploadedAt,
           hasStoredUpload: stored,
-          overridesBySituation: {},
-          activeSituationId: null,
+          ...freshDecisions(),
         }),
 
       clearDataset: () =>
@@ -124,143 +130,64 @@ export const useDatasetStore = create<DatasetStoreState>()(
           uploadedFileName: null,
           uploadedAt: null,
           hasStoredUpload: false,
-          overridesBySituation: {},
-          activeSituationId: null,
+          ...freshDecisions(),
         }),
 
-      setActiveSituation: (id) => set({ activeSituationId: id }),
+      setOverride: (transitionId, patch, note) =>
+        set((state) => ({
+          overridesByTransition: {
+            ...state.overridesByTransition,
+            [transitionId]: { ...state.overridesByTransition[transitionId], ...patch },
+          },
+          auditLog: [...state.auditLog, audit(transitionId, note)],
+        })),
 
-      setDisposition: (situationId, candidateId, disposition) =>
+      clearOverrides: (transitionId, keys, note) =>
         set((state) => {
-          const current = state.overridesBySituation[situationId] ?? emptyOverrides();
+          const current = { ...state.overridesByTransition[transitionId] };
+          for (const key of keys) delete current[key];
           return {
-            overridesBySituation: {
-              ...state.overridesBySituation,
-              [situationId]: {
-                ...current,
-                dispositions: { ...current.dispositions, [candidateId]: disposition },
-              },
-            },
+            overridesByTransition: { ...state.overridesByTransition, [transitionId]: current },
+            auditLog: [...state.auditLog, audit(transitionId, note)],
           };
         }),
 
-      setDispositions: (situationId, dispositions) =>
-        set((state) => {
-          const current = state.overridesBySituation[situationId] ?? emptyOverrides();
-          return {
-            overridesBySituation: {
-              ...state.overridesBySituation,
-              [situationId]: {
-                ...current,
-                dispositions: { ...current.dispositions, ...dispositions },
-              },
-            },
-          };
-        }),
+      setActionState: (actionId, transitionId, actionState, note) =>
+        set((state) => ({
+          actionStates: { ...state.actionStates, [actionId]: actionState },
+          auditLog: [...state.auditLog, audit(transitionId, note)],
+        })),
 
-      resetDispositions: (situationId) =>
+      reopenAction: (actionId, transitionId, note) =>
         set((state) => {
-          const current = state.overridesBySituation[situationId] ?? emptyOverrides();
-          return {
-            overridesBySituation: {
-              ...state.overridesBySituation,
-              [situationId]: { ...current, dispositions: {} },
-            },
-          };
-        }),
-
-      setMatchConfig: (situationId, config) =>
-        set((state) => {
-          const current = state.overridesBySituation[situationId] ?? emptyOverrides();
-          return {
-            overridesBySituation: {
-              ...state.overridesBySituation,
-              [situationId]: { ...current, matchConfig: config },
-            },
-          };
-        }),
-
-      releaseMaterial: (situationId, release) =>
-        set((state) => {
-          const current = state.overridesBySituation[situationId] ?? emptyOverrides();
-          return {
-            overridesBySituation: {
-              ...state.overridesBySituation,
-              [situationId]: {
-                ...current,
-                releases: { ...current.releases, [release.materialId]: release },
-              },
-            },
-          };
-        }),
-
-      undoMaterialRelease: (situationId, materialId) =>
-        set((state) => {
-          const current = state.overridesBySituation[situationId];
-          if (!current?.releases) return state;
-          const next = { ...current.releases };
-          delete next[materialId];
-          return {
-            overridesBySituation: {
-              ...state.overridesBySituation,
-              [situationId]: { ...current, releases: next },
-            },
-          };
-        }),
-
-      commitVolume: (situationId, commitment) =>
-        set((state) => {
-          const current = state.overridesBySituation[situationId] ?? emptyOverrides();
-          return {
-            overridesBySituation: {
-              ...state.overridesBySituation,
-              [situationId]: {
-                ...current,
-                // Committing a volume necessarily means carrying the item
-                // forward — a number that bears no load is not a commitment.
-                dispositions: { ...current.dispositions, [commitment.candidateId]: "carry_forward" },
-                commitments: { ...current.commitments, [commitment.candidateId]: commitment },
-              },
-            },
-          };
-        }),
-
-      releaseCommitment: (situationId, candidateId) =>
-        set((state) => {
-          const current = state.overridesBySituation[situationId];
-          if (!current?.commitments) return state;
-          const next = { ...current.commitments };
-          delete next[candidateId];
-          return {
-            overridesBySituation: {
-              ...state.overridesBySituation,
-              [situationId]: { ...current, commitments: next },
-            },
-          };
-        }),
-
-      setSeasonBasis: (situationId, periods) =>
-        set((state) => {
-          const current = state.overridesBySituation[situationId] ?? emptyOverrides();
-          return {
-            overridesBySituation: {
-              ...state.overridesBySituation,
-              // An empty selection is stored as "no override" rather than as an
-              // empty basis: the engine falls back to the latest season, so the
-              // planner cannot accidentally leave the plan with no history.
-              [situationId]: { ...current, seasonBasis: periods?.length ? periods : undefined },
-            },
-          };
+          const next = { ...state.actionStates };
+          delete next[actionId];
+          return { actionStates: next, auditLog: [...state.auditLog, audit(transitionId, note)] };
         }),
     }),
     {
       name: DATASET_STORAGE_KEY,
-      version: 1,
+      version: 2,
       // localStorage, not session: the chosen mode should survive a refresh so
       // the planner is not sent back to the first-run screen. Scoped to the
       // signed-in account — see `stores/storage-scope.ts`.
       storage: createJSONStorage(() => scopedWebStorage("local")),
       skipHydration: true,
+      // Anything stored by the previous product generation is meaningless
+      // against this model: keep the dataset choice, drop the decisions.
+      migrate: (persisted) => {
+        const old = (persisted ?? {}) as Partial<DatasetStoreState>;
+        return {
+          mode: null,
+          datasetId: "demo",
+          datasetName: "Scouting America demo",
+          seed: DEFAULT_DEMO_SEED,
+          uploadedFileName: old.uploadedFileName ?? null,
+          uploadedAt: old.uploadedAt ?? null,
+          hasStoredUpload: false,
+          ...freshDecisions(),
+        } as Partial<DatasetStoreState> as DatasetStoreState;
+      },
       partialize: (state) => ({
         mode: state.mode,
         datasetId: state.datasetId,
@@ -269,8 +196,9 @@ export const useDatasetStore = create<DatasetStoreState>()(
         uploadedFileName: state.uploadedFileName,
         uploadedAt: state.uploadedAt,
         hasStoredUpload: state.hasStoredUpload,
-        activeSituationId: state.activeSituationId,
-        overridesBySituation: state.overridesBySituation,
+        overridesByTransition: state.overridesByTransition,
+        actionStates: state.actionStates,
+        auditLog: state.auditLog,
       }),
       onRehydrateStorage: () => (state) => state?.setHasHydrated(true),
     }

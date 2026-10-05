@@ -27,7 +27,7 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
     // defaults the server rendered; restored scenario overrides and triage
     // decisions arrive on the next commit rather than diverging mid-hydration.
     //
-    // This is what makes Scenario Lab work survive navigation: the stores are
+    // This is what makes simulator work survive navigation: the stores are
     // module singletons, so a client-side route change already kept them, but
     // any full document load started from seed data every time — and Save,
     // which only flipped an in-memory status, was thrown away with it.

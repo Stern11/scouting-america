@@ -1,629 +1,433 @@
 /**
- * Deterministic intent engine for the V2 "Ask Heizen" bar (V2 §54).
+ * Deterministic intent engine for "Ask Heizen".
  *
- * Regex/keyword matching only — no network call, no LLM, no randomness. Every
- * reply is built from fields already present on the `PlanningSituation`
- * objects passed in through `CopilotContext`, so a reply can never disagree
- * with a number already on screen.
+ * Keyword matching only — no network call, no LLM, no randomness. Every
+ * number in a reply is read off a `TransitionView` the pages already render,
+ * or off a scenario view rebuilt from the same dataset with one lever moved.
+ * When the data cannot answer (no store-level data, nothing on order, no JDA
+ * plan) the reply says so rather than inventing a figure.
  *
- * If a `PlanningSituation` does not carry a number (no capacity data
- * uploaded, no BOM, no runway marker), the reply says so via `unavailable`
- * rather than inventing one — the same rule `lib/situations/build.ts`
- * follows when it leaves a `CapacityExposure`/`MaterialExposure` marked
- * `available: false`.
+ * What-ifs never touch the baseline: they come back as a `set_lever` action,
+ * which the bar writes to the Planning Simulator's draft.
  */
 
-import type {
-  CandidateItem,
-  CapacityCell,
-  CapacityExposure,
-  ContributorDisposition,
-  MaterialExposureRow,
-  PlanningSituation,
-} from "@/types/situation";
+import type { ScenarioAdjustments, TransitionView } from "@/types/transition";
+import { buildTransition } from "@/lib/transitions/build";
+import { sortForAttention } from "@/lib/transitions/portfolio";
+import { fmtDateShort, fmtMoney, fmtNum, fmtNum1, fmtPct } from "@/lib/utils/format";
 import type { CopilotContext, CopilotReply } from "./types";
-import { formatMonthLabel } from "@/lib/dataset/periods";
-import { fmtHours, fmtMoney, fmtPct, fmtWeeks, fmtDateShort } from "@/lib/utils/format";
 
 /* ------------------------------------------------------------------ */
-/* Resolution helpers                                                  */
+/* Suggestions                                                         */
 /* ------------------------------------------------------------------ */
+
+export const SUGGESTED_QUESTIONS: readonly string[] = [
+  "Why are we ordering more Cub Scout shirts when we still have old inventory?",
+  "Which stores will run out before the replacement shipment arrives?",
+  "What happens if the new Cub Scout Shirt shipment is delayed by two weeks?",
+  "Which SKU transitions have the most legacy inventory at risk?",
+  "Where can we move inventory instead of ordering more?",
+  "How much successor inventory could we avoid purchasing if legacy stock is interchangeable?",
+  "Which transitions need my attention today?",
+];
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
+
+const n = (x: number) => fmtNum(Math.round(x));
+const plural = (x: number, word: string) => `${n(x)} ${word}${Math.round(x) === 1 ? "" : "s"}`;
+
+/** Words too common across the catalogue to identify a product on their own. */
+const GENERIC = new Set(["legacy", "branding", "america", "scouting", "with", "and", "the", "set", "kit"]);
+
+const STATUS_RANK: Record<TransitionView["status"], number> = {
+  ACTION_NEEDED: 0,
+  MONITOR: 1,
+  TRANSITIONING: 2,
+  HEALTHY: 3,
+  COMPLETE: 4,
+};
 
 function words(text: string): string[] {
-  return text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  return text.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !GENERIC.has(w));
 }
 
-/** A situation named in the question, by a distinctive word from its title or event. */
-function resolveNamedSituation(question: string, situations: readonly PlanningSituation[]): PlanningSituation | undefined {
+/** A transition named in the question — by SKU id, transition id, or name. */
+function namedTransition(question: string, transitions: readonly TransitionView[]): TransitionView | undefined {
   const q = question.toLowerCase();
-  let best: { situation: PlanningSituation; score: number } | undefined;
-  for (const situation of situations) {
-    const candidates = new Set([...words(situation.title), ...words(situation.eventOrProgram)]);
-    let score = 0;
-    for (const w of candidates) {
-      if (w.length > 3 && q.includes(w)) score += 1;
+  const ids: string[] = q.match(/\b[a-z]{2,3}-\d{3,4}\b/g) ?? [];
+  if (ids.length > 0) {
+    const byId = transitions.find(
+      (t) =>
+        ids.includes(t.id.toLowerCase()) ||
+        [...t.lineage.predecessors, ...t.lineage.successors].some((s) => ids.includes(s.skuId.toLowerCase()))
+    );
+    if (byId) return byId;
+  }
+  const qWords = new Set(q.split(/[^a-z0-9]+/).filter(Boolean));
+  const hit = (w: string) => qWords.has(w) || qWords.has(`${w}s`) || (w.endsWith("s") && qWords.has(w.slice(0, -1)));
+  let best: { t: TransitionView; matched: number; ratio: number } | undefined;
+  for (const t of transitions) {
+    const nameWords = words(t.name);
+    if (nameWords.length === 0) continue;
+    const matched = nameWords.filter(hit).length;
+    // A single shared word ("scout", "uniform") is not a name.
+    if (matched < Math.min(2, nameWords.length)) continue;
+    const ratio = matched / nameWords.length;
+    if (
+      !best ||
+      matched > best.matched ||
+      (matched === best.matched && ratio > best.ratio) ||
+      (matched === best.matched && ratio === best.ratio && STATUS_RANK[t.status] < STATUS_RANK[best.t.status])
+    ) {
+      best = { t, matched, ratio };
     }
-    if (score > 0 && (best === undefined || score > best.score)) best = { situation, score };
   }
-  return best?.situation;
+  return best?.t;
 }
 
-function situationIdFromPathname(pathname: string): string | undefined {
-  return /^\/workspace\/([^/]+)/.exec(pathname)?.[1];
+function routeTransition(pathname: string, transitions: readonly TransitionView[]): TransitionView | undefined {
+  const id = /\/transitions\/([^/?#]+)/.exec(pathname)?.[1] ?? /[?&]transition=([^&#]+)/.exec(pathname)?.[1];
+  return id ? transitions.find((t) => t.id === decodeURIComponent(id)) : undefined;
 }
 
-/**
- * The situation a question is about. A name mentioned in the question wins
- * over everything else; failing that, the workspace page the planner is
- * currently on; failing that, the store's active situation; failing that, the
- * only situation there is, if there is exactly one.
- */
-function resolveSituation(question: string, ctx: CopilotContext): PlanningSituation | undefined {
-  const named = resolveNamedSituation(question, ctx.situations);
-  if (named) return named;
-
-  const fromPath = situationIdFromPathname(ctx.pathname);
-  if (fromPath) {
-    const match = ctx.situations.find((s) => s.id === fromPath);
-    if (match) return match;
-  }
-
-  if (ctx.activeSituationId) {
-    const active = ctx.situations.find((s) => s.id === ctx.activeSituationId);
-    if (active) return active;
-  }
-
-  return ctx.situations.length === 1 ? ctx.situations[0] : undefined;
+/** Named → on-screen → (when the question needs one) the most urgent active transition. */
+function resolve(question: string, ctx: CopilotContext, fallbackToUrgent: boolean): TransitionView | undefined {
+  return (
+    namedTransition(question, ctx.transitions) ??
+    routeTransition(ctx.pathname, ctx.transitions) ??
+    (fallbackToUrgent ? sortForAttention(ctx.transitions.filter((t) => t.status !== "COMPLETE"))[0] : undefined)
+  );
 }
 
-function needSituationReply(ctx: CopilotContext): CopilotReply {
-  const example = ctx.situations[0]?.title;
-  return {
-    text: example
-      ? `I need to know which situation you mean — try naming one, like "${example}".`
-      : "No planning situations are loaded yet.",
-    action: { kind: "none" },
-    visualsUpdated: [],
-    unavailable: example ? "Situation not specified." : "No planning situations loaded.",
-  };
+function active(ctx: CopilotContext): TransitionView[] {
+  return ctx.transitions.filter((t) => t.status !== "COMPLETE");
 }
 
-interface LineRef {
-  lineId: string;
-  lineName: string;
+function reply(text: string, extra: Partial<CopilotReply> = {}): CopilotReply {
+  return { text, action: { kind: "none" }, visualsUpdated: [], ...extra };
 }
 
-/** Resolves a line by id ("line 03", "l03", "line-03"), full name, or a distinctive word of it. */
-function resolveLine(query: string, lines: readonly LineRef[]): LineRef | undefined {
-  const q = query.toLowerCase();
-  const numMatch = /\bline[\s_-]?0?(\d+)\b|\bl0?(\d)\b/.exec(q);
-  const num = numMatch?.[1] ?? numMatch?.[2];
-  if (num) {
-    const padded = num.padStart(2, "0");
-    const byNum = lines.find((l) => l.lineId.toLowerCase().endsWith(padded));
-    if (byNum) return byNum;
-  }
-  const byName = lines.find((l) => q.includes(l.lineName.toLowerCase()));
-  if (byName) return byName;
-  const byId = lines.find((l) => q.includes(l.lineId.toLowerCase()));
-  if (byId) return byId;
-  return lines.find((l) => words(l.lineName).some((w) => w.length > 4 && q.includes(w)));
+function nothingLoaded(): CopilotReply {
+  return reply("No transitions are loaded yet.", { unavailable: "No planning data loaded." });
 }
 
-function defaultLine(capacity: CapacityExposure): LineRef | undefined {
-  if (capacity.lines.length === 1) return capacity.lines[0];
-  if (capacity.exposedLineIds.length === 1) {
-    const found = capacity.lines.find((l) => l.lineId === capacity.exposedLineIds[0]);
-    if (found) return found;
+const NUMBER_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, a: 1, an: 1 };
+
+function parseWeeks(q: string): number | undefined {
+  const m = /\b(\d+|one|two|three|four|five|six|a|an)\s*(?:-|\s)?(?:weeks?|wks?)\b/.exec(q);
+  if (!m?.[1]) return undefined;
+  const v = NUMBER_WORDS[m[1]] ?? Number(m[1]);
+  return Number.isFinite(v) ? v : undefined;
+}
+
+function scenarioView(ctx: CopilotContext, id: string, adjustments: ScenarioAdjustments): TransitionView | undefined {
+  if (!ctx.dataset) return undefined;
+  return buildTransition(ctx.dataset, id, {
+    overridesByTransition: ctx.overridesByTransition,
+    scenario: { transitionId: id, adjustments },
+  });
+}
+
+const simulatorHref = (id: string) => `/simulator?transition=${encodeURIComponent(id)}`;
+const successorLabel = (t: TransitionView) => t.lineage.successors.map((s) => s.skuId).join(" + ") || "the successor";
+
+/* ------------------------------------------------------------------ */
+/* Intents                                                             */
+/* ------------------------------------------------------------------ */
+
+function tryNavigate(q: string, ctx: CopilotContext): CopilotReply | null {
+  if (!/^(open|show|go to|take me to|navigate to|view)\b/.test(q)) return null;
+  if (/\bsimulator|scenario/.test(q)) {
+    const t = resolve(q, ctx, false);
+    return reply(t ? `Opening ${t.name} in the Planning Simulator.` : "Opening the Planning Simulator.", {
+      action: { kind: "navigate", href: t ? simulatorHref(t.id) : "/simulator" },
+      visualsUpdated: ["Planning Simulator"],
+    });
   }
-  if (capacity.peak) {
-    const found = capacity.lines.find((l) => l.lineId === capacity.peak?.lineId);
-    if (found) return found;
+  if (/\bactions?\b|work queue/.test(q)) {
+    return reply("Opening Actions.", { action: { kind: "navigate", href: "/actions" }, visualsUpdated: ["Actions"] });
   }
+  if (/\boverview|home\b/.test(q)) {
+    return reply("Opening Overview.", { action: { kind: "navigate", href: "/overview" }, visualsUpdated: ["Overview"] });
+  }
+  const t = namedTransition(q, ctx.transitions);
+  if (t) {
+    return reply(`Opening ${t.name}.`, {
+      action: { kind: "navigate", href: `/transitions/${encodeURIComponent(t.id)}` },
+      visualsUpdated: ["SKU Transitions"],
+    });
+  }
+  if (/\btransitions?\b/.test(q)) {
+    return reply("Opening SKU Transitions.", {
+      action: { kind: "navigate", href: "/transitions" },
+      visualsUpdated: ["SKU Transitions"],
+    });
+  }
+  return null;
+}
+
+function tryDelay(q: string, ctx: CopilotContext): CopilotReply | null {
+  if (!/\b(delay|delayed|late|slips?|pushed|push(?:es)? out)\b/.test(q)) return null;
+  if (!/\b(shipment|inbound|po|purchase order|arriv|receipt|delivery|order)/.test(q)) return null;
+  const t = resolve(q, ctx, true);
+  if (!t) return nothingLoaded();
+  const weeks = parseWeeks(q) ?? 2;
+  const next = t.inventory.receipts.find((r) => t.lineage.successors.some((s) => s.skuId === r.skuId));
+  if (!next) {
+    return reply(`Nothing is on order for ${successorLabel(t)}, so there is no shipment to delay.`, {
+      unavailable: "No inbound supply on order for this transition.",
+    });
+  }
+  const scenario = scenarioView(ctx, t.id, { inboundDelayWeeks: weeks });
+  if (!scenario) return nothingLoaded();
+  const b = t.coverage;
+  const s = scenario.coverage;
+  const stores = b.available
+    ? `stores at risk go ${n(b.atRiskCount)} → ${n(s.atRiskCount)} (${n(s.atRiskAfterPlanCount)} still short after transfers and DC stock)`
+    : "store-level impact is not available without store data";
+  return reply(
+    `If ${next.purchaseOrderId ?? "the next shipment"} lands ${plural(weeks, "week")} later, ${stores}. ` +
+      `The recommended ${successorLabel(t)} order moves ${n(t.replenishment.finalOrderUnits)} → ${n(scenario.replenishment.finalOrderUnits)} units. ` +
+      `I've set the delay in the Planning Simulator; the baseline is unchanged.`,
+    {
+      action: { kind: "set_lever", transitionId: t.id, key: "inboundDelayWeeks", value: weeks },
+      visualsUpdated: ["Planning Simulator"],
+    }
+  );
+}
+
+function parsePercent(q: string): number | undefined {
+  if (/\bnot (fully )?interchangeable|can'?t be used|cannot be used|none of the legacy/.test(q)) return 0;
+  const m = /(\d{1,3})\s*%/.exec(q) ?? /(\d{1,3})\s*percent/.exec(q);
+  if (m?.[1]) return Math.min(100, Number(m[1])) / 100;
+  if (/\b(fully|completely|100)\b.*interchangeable|interchangeable/.test(q)) return 1;
   return undefined;
 }
 
-interface MaterialRef {
-  materialId: string;
-  materialName: string;
-}
-
-/** Resolves a material by id, full name, or a distinctive word from its name. */
-function resolveMaterial(query: string, rows: readonly MaterialRef[]): MaterialRef | undefined {
-  const q = query.trim().toLowerCase();
-  if (!q) return undefined;
-  const byId = rows.find((r) => r.materialId.toLowerCase() === q);
-  if (byId) return byId;
-  const byName = rows.find((r) => r.materialName.toLowerCase() === q || r.materialName.toLowerCase().includes(q));
-  if (byName) return byName;
-  const qWords = q.split(/\s+/).filter((w) => w.length > 3);
-  return rows.find((r) => qWords.some((w) => r.materialName.toLowerCase().includes(w)));
-}
-
-/** Resolves one or more candidate items by item id, full name, or a distinctive word. */
-function resolveCandidates(query: string, candidates: readonly CandidateItem[]): CandidateItem[] {
-  const q = query.trim().toLowerCase();
-  if (!q) return [];
-  const byId = candidates.filter((c) => c.itemId.toLowerCase() === q || c.id.toLowerCase() === q);
-  if (byId.length > 0) return byId;
-  const byName = candidates.filter((c) => {
-    const name = c.itemName.toLowerCase();
-    return name === q || name.includes(q) || q.includes(name);
-  });
-  if (byName.length > 0) return byName;
-  const qWords = q.split(/\s+/).filter((w) => w.length > 3);
-  return candidates.filter((c) => qWords.some((w) => c.itemName.toLowerCase().includes(w)));
-}
-
-const MONTH_NAMES: Record<string, number> = {
-  jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4,
-  may: 5, jun: 6, june: 6, jul: 7, july: 7, aug: 8, august: 8,
-  sep: 9, sept: 9, september: 9, oct: 10, october: 10, nov: 11, november: 11, dec: 12, december: 12,
-};
-
-/* ------------------------------------------------------------------ */
-/* Reconciliation actions                                              */
-/* ------------------------------------------------------------------ */
-
-const DISPOSITION_PHRASES: { re: RegExp; value: ContributorDisposition }[] = [
-  { re: /intentional exit/i, value: "intentional_exit" },
-  { re: /already represented/i, value: "already_represented" },
-  { re: /carry[\s-]?forward/i, value: "carry_forward" },
-  { re: /under review/i, value: "under_review" },
-  { re: /new or changed/i, value: "new_or_changed" },
-  { re: /unreviewed/i, value: "unreviewed" },
-];
-
-const DISPOSITION_LABEL: Record<ContributorDisposition, string> = {
-  unreviewed: "unreviewed",
-  carry_forward: "carry forward",
-  already_represented: "already represented",
-  intentional_exit: "intentional exit",
-  under_review: "under review",
-  new_or_changed: "new or changed",
-};
-
-function matchDispositionPhrase(text: string): ContributorDisposition | null {
-  for (const { re, value } of DISPOSITION_PHRASES) if (re.test(text)) return value;
-  return null;
-}
-
-function tryDisposition(question: string, ctx: CopilotContext): CopilotReply | null {
-  const q = question.trim();
-
-  // Bulk: "carry forward everything unmatched" / "carry forward all that are unmatched"
-  if (/^carry[\s-]?forward\s+(everything|all)\b.*unmatched/i.test(q)) {
-    const situation = resolveSituation(question, ctx);
-    if (!situation) return needSituationReply(ctx);
-    const targets = situation.candidateItems.filter((c) => !c.match.matchedItemId);
-    if (targets.length === 0) {
-      return {
-        text: `Every prior item for ${situation.title} already has a match, so there is nothing unmatched to carry forward.`,
-        action: { kind: "none" },
-        visualsUpdated: [],
-      };
+function tryAvoidPurchasing(q: string, ctx: CopilotContext): CopilotReply | null {
+  if (!/\bavoid(ed)?\b.*\b(purchas|buy|order)|\b(defer|deferred)\b.*\b(purchas|buy|order)/.test(q)) return null;
+  const pct = /%|percent|\bonly\b/.test(q) ? parsePercent(q) : undefined;
+  const t = resolve(q, ctx, false);
+  if (t && pct !== undefined) return substitutabilityWhatIf(t, pct, ctx);
+  if (t) {
+    const r = t.replenishment;
+    if (!r.available) {
+      return reply(`${t.name} has no successor to order, so there is nothing to avoid.`, {
+        unavailable: "No successor replenishment for this transition.",
+      });
     }
-    return {
-      text: `Setting ${targets.length} unmatched item${targets.length === 1 ? "" : "s"} to carry forward for ${situation.title}.`,
-      action: {
-        kind: "set_disposition",
-        situationId: situation.id,
-        candidateIds: targets.map((c) => c.id),
-        disposition: "carry_forward",
-      },
-      visualsUpdated: ["Reconcile"],
-    };
+    const value = r.unitCost !== undefined ? ` (${fmtMoney(r.avoidedUnits * r.unitCost, t.currency)} at cost)` : "";
+    return reply(
+      `${n(r.avoidedUnits)} ${successorLabel(t)} units${value} can be deferred or avoided: ${n(r.usableLegacy)} usable legacy units at ${fmtPct(t.assumptions.substitutabilityPct)} interchangeable. ` +
+        `Ordering as if legacy stock did not exist would mean ${n(r.ignoringLegacyUnits)} units; Heizen recommends ${n(r.recommendedUnits)}.`
+    );
   }
-
-  // "treat X as Y" / "mark X as Y"
-  const m = /^(?:treat|mark)\s+(.+?)\s+as\s+(?:an?\s+)?(.+?)[.?!]?$/i.exec(q);
-  if (!m) return null;
-  const itemQuery = m[1]?.trim() ?? "";
-  const dispositionPhrase = m[2]?.trim() ?? "";
-  const disposition = matchDispositionPhrase(dispositionPhrase);
-  if (!disposition) return null;
-
-  const situation = resolveSituation(question, ctx);
-  if (!situation) return needSituationReply(ctx);
-  const targets = resolveCandidates(itemQuery, situation.candidateItems);
-  if (targets.length === 0) {
-    return {
-      text: `I could not find "${itemQuery}" among the prior items for ${situation.title}.`,
-      action: { kind: "none" },
-      visualsUpdated: [],
-      unavailable: `No candidate item matches "${itemQuery}".`,
-    };
+  const list = active(ctx).filter((v) => v.replenishment.available);
+  const units = list.reduce((sum, v) => sum + v.replenishment.avoidedUnits, 0);
+  let value: number | null = 0;
+  for (const v of list) {
+    if (v.replenishment.avoidedUnits === 0) continue;
+    if (v.replenishment.unitCost === undefined) value = null;
+    else if (value !== null) value += v.replenishment.avoidedUnits * v.replenishment.unitCost;
   }
-  return {
-    text: `Set ${targets.length} item${targets.length === 1 ? "" : "s"} to ${DISPOSITION_LABEL[disposition]} for ${situation.title}.`,
-    action: {
-      kind: "set_disposition",
-      situationId: situation.id,
-      candidateIds: targets.map((c) => c.id),
-      disposition,
-    },
-    visualsUpdated: ["Reconcile"],
-  };
-}
-
-/* ------------------------------------------------------------------ */
-/* Scenario actions                                                    */
-/* ------------------------------------------------------------------ */
-
-function tryScenarioHours(question: string, ctx: CopilotContext): CopilotReply | null {
-  const m = /assume\s+([a-zA-Z]+)\s+capacity\s+(?:is|to|=|at)?\s*(\d+(?:\.\d+)?)\s*hours?(?:\s+on\s+(.+?))?[.?!]?$/i.exec(
-    question
+  const top = [...list].sort((a, b) => b.replenishment.avoidedUnits - a.replenishment.avoidedUnits)[0];
+  return reply(
+    `Across ${plural(list.length, "active transition")}, ${n(units)} successor units${value !== null ? ` (${fmtMoney(value, list[0]?.currency)} at cost)` : ""} can be deferred or avoided by counting usable legacy stock. ` +
+      (top && top.replenishment.avoidedUnits > 0
+        ? `The most is ${top.name}: ${n(top.replenishment.avoidedUnits)} units.`
+        : "No single transition stands out.")
   );
-  if (!m) return null;
-  const monthWord = m[1]?.toLowerCase() ?? "";
-  const hours = Number(m[2]);
-  const lineQuery = m[3];
-
-  const situation = resolveSituation(question, ctx);
-  if (!situation) return needSituationReply(ctx);
-
-  const monthNum = MONTH_NAMES[monthWord];
-  if (!monthNum) {
-    return {
-      text: `I do not recognize "${monthWord}" as a month.`,
-      action: { kind: "none" },
-      visualsUpdated: [],
-      unavailable: `Unrecognized month "${monthWord}".`,
-    };
-  }
-
-  const capacity = situation.capacityExposure;
-  if (!capacity.available) {
-    return {
-      text: capacity.unavailableReason ?? "Capacity data is not available for this situation.",
-      action: { kind: "none" },
-      visualsUpdated: [],
-      unavailable: capacity.unavailableReason ?? "Capacity data not available.",
-    };
-  }
-
-  const padded = String(monthNum).padStart(2, "0");
-  const period = capacity.periods.find((p) => p.slice(5, 7) === padded);
-  if (!period) {
-    return {
-      text: `${situation.title} has no capacity data for ${monthWord}.`,
-      action: { kind: "none" },
-      visualsUpdated: [],
-      unavailable: `No capacity period for "${monthWord}" on ${situation.title}.`,
-    };
-  }
-
-  const line = lineQuery ? resolveLine(lineQuery, capacity.lines) : defaultLine(capacity);
-  if (!line) {
-    return {
-      text: `I could not tell which line you meant for ${situation.title}.`,
-      action: { kind: "none" },
-      visualsUpdated: [],
-      unavailable: "Line not specified.",
-    };
-  }
-
-  return {
-    text: `Setting ${line.lineName} available hours in ${formatMonthLabel(period)} to ${fmtHours(hours)} in a new scenario for ${situation.title}.`,
-    action: { kind: "set_available_hours", situationId: situation.id, lineId: line.lineId, period, hours },
-    visualsUpdated: ["Scenario Lab", "Capacity"],
-  };
 }
 
-function tryScenarioLeadTime(question: string, ctx: CopilotContext): CopilotReply | null {
-  const m = /(\d+(?:\.\d+)?)\s*-?\s*day(?:s)?\s+lead\s*time(?:\s+(?:for|on)\s+(.+?))?[.?!]?$/i.exec(question);
-  if (!m) return null;
-  const days = Number(m[1]);
-  const materialQuery = (m[2] ?? "").trim();
-
-  const situation = resolveSituation(question, ctx);
-  if (!situation) return needSituationReply(ctx);
-
-  const materials = situation.materialExposure;
-  if (!materials.available) {
-    return {
-      text: materials.unavailableReason ?? "Material data is not available for this situation.",
-      action: { kind: "none" },
-      visualsUpdated: [],
-      unavailable: materials.unavailableReason ?? "Material data not available.",
-    };
-  }
-
-  const material = materialQuery ? resolveMaterial(materialQuery, materials.rows) : undefined;
-  if (!material) {
-    return {
-      text: materialQuery
-        ? `I could not find a material matching "${materialQuery}" for ${situation.title}.`
-        : `Which material's lead time should I change for ${situation.title}?`,
-      action: { kind: "none" },
-      visualsUpdated: [],
-      unavailable: "Material not specified.",
-    };
-  }
-
-  return {
-    text: `Setting ${material.materialName} lead time to ${days}d in a new scenario for ${situation.title}.`,
-    action: { kind: "set_lead_time", situationId: situation.id, materialId: material.materialId, days },
-    visualsUpdated: ["Scenario Lab", "Materials"],
-  };
-}
-
-/* ------------------------------------------------------------------ */
-/* Navigation                                                          */
-/* ------------------------------------------------------------------ */
-
-const NAV_VERB_RE = /\b(open|show|take me to|go to|navigate to|switch to|pull up|display)\b/i;
-const QUESTION_WORD_RE = /\b(why|what|which|how|when|who)\b/i;
-
-function tryNavigate(question: string, ctx: CopilotContext): CopilotReply | null {
-  const q = question.toLowerCase();
-  const hasVerb = NAV_VERB_RE.test(q);
-  const looksLikeQuestion = QUESTION_WORD_RE.test(q);
-  // A question ("which line is exposed") is never a bare navigation command
-  // unless it also carries an explicit navigation verb.
-  if (!hasVerb && looksLikeQuestion) return null;
-
-  if (/overview/.test(q)) {
-    return { text: "Opening Overview.", action: { kind: "navigate", href: "/overview" }, visualsUpdated: ["Overview"] };
-  }
-  if (/scenario/.test(q)) {
-    const situation = resolveSituation(question, ctx);
-    const href = situation ? `/scenario-lab?situation=${situation.id}` : "/scenario-lab";
-    return {
-      text: situation ? `Opening Scenario Lab for ${situation.title}.` : "Opening Scenario Lab.",
-      action: { kind: "navigate", href },
-      visualsUpdated: ["Scenario Lab"],
-    };
-  }
-  if (/\bdecision/.test(q)) {
-    return { text: "Opening Decisions.", action: { kind: "navigate", href: "/decisions" }, visualsUpdated: ["Decisions"] };
-  }
-  if (/reconcil/.test(q)) {
-    const situation = resolveSituation(question, ctx);
-    if (!situation) return needSituationReply(ctx);
-    return {
-      text: `Opening Reconcile for ${situation.title}.`,
-      action: { kind: "navigate", href: `/workspace/${situation.id}/reconcile` },
-      visualsUpdated: ["Reconcile"],
-    };
-  }
-  // Materials and capacity are no longer destinations. They are consequences of
-  // particular unrepresented items, so the honest answer to "show me materials"
-  // is the list of items causing them, not a page of aggregates.
-  if (/material|supply|capacity/.test(q)) {
-    const situation = resolveSituation(question, ctx);
-    if (!situation) return needSituationReply(ctx);
-    const subject = /capacity/.test(q) ? "Capacity" : "Materials";
-    return {
-      text: `${subject} follows from the items that are not represented. Opening Reconcile for ${situation.title} — open an item to see the lines and components it drives.`,
-      action: { kind: "navigate", href: `/workspace/${situation.id}/reconcile` },
-      visualsUpdated: ["Reconcile"],
-    };
-  }
-  if (/\bdecide\b/.test(q)) {
-    const situation = resolveSituation(question, ctx);
-    if (!situation) return needSituationReply(ctx);
-    return {
-      text: `Opening Decisions for ${situation.title}.`,
-      action: { kind: "navigate", href: `/decisions?programme=${situation.id}` },
-      visualsUpdated: ["Decisions"],
-    };
-  }
-  return null;
-}
-
-/* ------------------------------------------------------------------ */
-/* Capacity questions                                                  */
-/* ------------------------------------------------------------------ */
-
-const CAPACITY_RE = /\bline\b|\bcapacity\b|\butiliz|\butilis|\bpeak\b|\bexposed\b|\bexposure\b/i;
-
-function tryCapacity(question: string, ctx: CopilotContext): CopilotReply | null {
-  if (!CAPACITY_RE.test(question)) return null;
-  const situation = resolveSituation(question, ctx);
-  if (!situation) return needSituationReply(ctx);
-
-  const capacity = situation.capacityExposure;
-  if (!capacity.available) {
-    return {
-      text: capacity.unavailableReason ?? "Capacity data is not available for this situation.",
-      action: { kind: "none" },
-      visualsUpdated: [],
-      unavailable: capacity.unavailableReason ?? "Capacity data not available.",
-    };
-  }
-
-  const q = question.toLowerCase();
-
-  if (/which line|exposed|exposure/.test(q)) {
-    if (capacity.exposedLineIds.length === 0) {
-      return {
-        text: `No line exceeds its target utilization for ${situation.title}.`,
-        action: { kind: "none" },
-        visualsUpdated: ["Capacity"],
-      };
+function substitutabilityWhatIf(t: TransitionView, pct: number, ctx: CopilotContext): CopilotReply {
+  const scenario = scenarioView(ctx, t.id, { substitutabilityPct: pct });
+  if (!scenario) return nothingLoaded();
+  return reply(
+    `At ${fmtPct(pct)} interchangeable, usable legacy for ${t.name} goes ${n(t.inventory.usableLegacy)} → ${n(scenario.inventory.usableLegacy)} units. ` +
+      `The recommended order moves ${n(t.replenishment.finalOrderUnits)} → ${n(scenario.replenishment.finalOrderUnits)}, and purchasing deferred or avoided moves ${n(t.replenishment.avoidedUnits)} → ${n(scenario.replenishment.avoidedUnits)}. ` +
+      `Set in the Planning Simulator; the baseline is unchanged.`,
+    {
+      action: { kind: "set_lever", transitionId: t.id, key: "substitutabilityPct", value: pct },
+      visualsUpdated: ["Planning Simulator"],
     }
-    const names = capacity.exposedLineIds.map((id) => capacity.lines.find((l) => l.lineId === id)?.lineName ?? id);
-    return {
-      text: `${names.join(", ")} exceed${names.length === 1 ? "s" : ""} target utilization for ${situation.title}.`,
-      action: { kind: "none" },
-      visualsUpdated: ["Capacity"],
-    };
-  }
-
-  const namedLine = resolveLine(question, capacity.lines);
-  const cell: CapacityCell | undefined = namedLine
-    ? capacity.cells
-        .filter((c) => c.lineId === namedLine.lineId)
-        .reduce<CapacityCell | undefined>(
-          (worst, c) => (worst === undefined || c.effectiveUtilization > worst.effectiveUtilization ? c : worst),
-          undefined
-        )
-    : capacity.peak;
-
-  if (!cell) {
-    return {
-      text: `No capacity cells are available for ${situation.title}.`,
-      action: { kind: "none" },
-      visualsUpdated: [],
-      unavailable: "No capacity cells computed.",
-    };
-  }
-
-  const reasons: string[] = [];
-  if (cell.plannedMaintenanceHours > 0) reasons.push(`${fmtHours(cell.plannedMaintenanceHours)} maintenance`);
-  if (cell.projectDowntimeHours > 0) reasons.push(`${fmtHours(cell.projectDowntimeHours)} project downtime`);
-  if (cell.laborConstraintHours > 0) reasons.push(`${fmtHours(cell.laborConstraintHours)} labor constraint`);
-  const reasonSentence = reasons.length > 0 ? ` ${reasons.join(", ")} reduce available hours.` : "";
-
-  return {
-    text: `${cell.lineName} in ${formatMonthLabel(cell.period)}: formal ${fmtPct(cell.formalUtilization)}, effective ${fmtPct(cell.effectiveUtilization)} of ${fmtHours(cell.availableHours)} available.${reasonSentence}`,
-    action: { kind: "none" },
-    visualsUpdated: ["Capacity"],
-  };
+  );
 }
 
-/* ------------------------------------------------------------------ */
-/* Material questions                                                  */
-/* ------------------------------------------------------------------ */
-
-const MATERIAL_RE = /\bplan now\b|\bshould wait\b|\bwhich material\b|\bmaterial\b.*\bfirst\b|\bcomponent(s)?\b/i;
-
-function tryMaterial(question: string, ctx: CopilotContext): CopilotReply | null {
-  if (!MATERIAL_RE.test(question)) return null;
-  const situation = resolveSituation(question, ctx);
-  if (!situation) return needSituationReply(ctx);
-
-  const materials = situation.materialExposure;
-  if (!materials.available) {
-    return {
-      text: materials.unavailableReason ?? "Material data is not available for this situation.",
-      action: { kind: "none" },
-      visualsUpdated: [],
-      unavailable: materials.unavailableReason ?? "Material data not available.",
-    };
+function trySubstitutability(q: string, ctx: CopilotContext): CopilotReply | null {
+  if (!/interchangeable|substitut|\busable\b|can be used/.test(q) || !/\b(if|what|suppose|assume)\b/.test(q)) return null;
+  const pct = parsePercent(q);
+  if (pct === undefined) return null;
+  const t = resolve(q, ctx, true);
+  if (!t) return nothingLoaded();
+  if (t.lineage.predecessors.length === 0) {
+    return reply(`${t.name} has no legacy SKU, so substitutability does not apply.`, {
+      unavailable: "No legacy inventory for this transition.",
+    });
   }
+  return substitutabilityWhatIf(t, pct, ctx);
+}
 
-  const q = question.toLowerCase();
+function tryWhyOrdering(q: string, ctx: CopilotContext): CopilotReply | null {
+  if (!/\bwhy\b.*\b(order|buy|purchas|replenish)/.test(q) && !/\b(order|ordering|buy)\b.*\b(old|legacy|existing) (inventory|stock)/.test(q))
+    return null;
+  const t = resolve(q, ctx, true);
+  if (!t) return nothingLoaded();
+  const r = t.replenishment;
+  if (!r.available) {
+    return reply(`${t.name} has no successor to order — the plan is to sell through ${n(t.inventory.legacyOnHand)} legacy units.`, {
+      unavailable: "No successor replenishment for this transition.",
+    });
+  }
+  const jda =
+    r.jda?.plannedOrderUnits !== undefined
+      ? ` JDA plans ${n(r.jda.plannedOrderUnits)}, treating ${successorLabel(t)} as a new SKU.`
+      : "";
+  const verdict =
+    r.finalOrderUnits > 0
+      ? `so Heizen recommends ${n(r.finalOrderUnits)} units — not the ${n(r.ignoringLegacyUnits)} an order ignoring legacy stock would need.`
+      : `so no order is needed today — ignoring legacy stock would have called for ${n(r.ignoringLegacyUnits)}.`;
+  return reply(
+    `${t.name} needs ${n(r.requirement)} units over ${r.horizonWeeks} weeks (continuity demand plus ${fmtNum1(r.safetyStockWeeks)} weeks' safety stock). ` +
+      `${n(r.usableLegacy)} usable legacy, ${n(r.successorOnHand)} successor on hand and ${n(r.eligibleInbound)} inbound cover most of it, ${verdict}` +
+      jda
+  );
+}
 
-  if (/should wait/.test(q)) {
-    if (materials.waitCount === 0) {
-      return { text: `Nothing is waiting for ${situation.title}.`, action: { kind: "none" }, visualsUpdated: ["Materials"] };
+function tryStoresRunOut(q: string, ctx: CopilotContext): CopilotReply | null {
+  if (!/\b(run out|runs out|stock ?outs?|out of stock|short)\b/.test(q) || !/\bstores?\b|\bwhere\b|\bwhich\b/.test(q)) return null;
+  const named = namedTransition(q, ctx.transitions) ?? routeTransition(ctx.pathname, ctx.transitions);
+  if (!named && /\b(all|across|network|portfolio|every)\b/.test(q)) return portfolioStockouts(ctx);
+  const t = named ?? resolve(q, ctx, true);
+  if (!t) return nothingLoaded();
+  const c = t.coverage;
+  if (!c.available) {
+    return reply(`Store-level coverage isn't available for ${t.name}. ${c.unavailableReason ?? ""}`.trim(), {
+      unavailable: c.unavailableReason ?? "No store-level data.",
+    });
+  }
+  if (c.atRiskCount === 0) {
+    return reply(`No ${t.name} store runs out before its next shipment can reach it.`);
+  }
+  const next = t.inventory.receipts.find((r) => t.lineage.successors.some((s) => s.skuId === r.skuId));
+  const worst = c.rows
+    .filter((r) => r.atRisk)
+    .slice(0, 3)
+    .map((r) => `${r.store.storeName} (${fmtNum1(r.weeksOfCover ?? 0)} wks)`)
+    .join(", ");
+  const shipment = next
+    ? `before the ${fmtDateShort(next.expectedDate)} ${successorLabel(t)} shipment${next.purchaseOrderId ? ` (${next.purchaseOrderId})` : ""} can reach them`
+    : `before any new ${successorLabel(t)} stock could arrive — nothing is on order`;
+  const covered = c.atRiskCount - c.atRiskAfterPlanCount;
+  return reply(
+    `${plural(c.atRiskCount, "store")} run out ${shipment}${c.earliestStockout ? `; the first on ${fmtDateShort(c.earliestStockout)}` : ""}. ` +
+      `Lowest cover: ${worst}. ` +
+      `Transfers and DC stock cover ${n(covered)}; ${n(c.atRiskAfterPlanCount)} remain short.`,
+    {
+      action: { kind: "navigate", href: `/transitions/${encodeURIComponent(t.id)}` },
+      visualsUpdated: ["Store coverage"],
     }
-    const example: MaterialExposureRow | undefined = materials.rows.find((r) => r.status === "WAIT");
-    return {
-      text: `${materials.waitCount} component${materials.waitCount === 1 ? "" : "s"} should wait for ${situation.title}.${example ? ` ${example.materialName}: ${example.reason}` : ""}`,
-      action: { kind: "none" },
-      visualsUpdated: ["Materials"],
-    };
-  }
-
-  if (/which material|\bfirst\b/.test(q)) {
-    if (!materials.earliestDecisionDate) {
-      return {
-        text: `No material decision date is set for ${situation.title}.`,
-        action: { kind: "none" },
-        visualsUpdated: [],
-        unavailable: "No earliest decision date.",
-      };
-    }
-    const driver = materials.rows.find((r) => r.decisionDate === materials.earliestDecisionDate);
-    return {
-      text: `${driver?.materialName ?? "A component"} sets the earliest material deadline for ${situation.title}, by ${fmtDateShort(materials.earliestDecisionDate)}.${driver ? ` ${driver.reason}` : ""}`,
-      action: { kind: "none" },
-      visualsUpdated: ["Materials"],
-    };
-  }
-
-  // Default: what can be planned now.
-  if (materials.planNowCount === 0) {
-    return { text: `Nothing can be planned now for ${situation.title}.`, action: { kind: "none" }, visualsUpdated: ["Materials"] };
-  }
-  const example = materials.rows.find((r) => r.status === "PLAN_NOW");
-  return {
-    text: `${materials.planNowCount} component${materials.planNowCount === 1 ? "" : "s"} can be planned now for ${situation.title}.${example ? ` ${example.materialName}: ${example.reason}` : ""}`,
-    action: { kind: "none" },
-    visualsUpdated: ["Materials"],
-  };
+  );
 }
 
-/* ------------------------------------------------------------------ */
-/* Runway                                                               */
-/* ------------------------------------------------------------------ */
+function portfolioStockouts(ctx: CopilotContext): CopilotReply {
+  const list = active(ctx).filter((t) => t.coverage.atRiskCount > 0).sort((a, b) => b.coverage.atRiskCount - a.coverage.atRiskCount);
+  if (list.length === 0) return reply("No store runs out before its next shipment in any active transition.");
+  const total = list.reduce((sum, t) => sum + t.coverage.atRiskCount, 0);
+  return reply(
+    `${n(total)} store stockouts are projected across ${plural(list.length, "transition")}. ` +
+      `Most: ${list.slice(0, 3).map((t) => `${t.name} (${n(t.coverage.atRiskCount)})`).join(", ")}.`
+  );
+}
 
-const RUNWAY_RE = /\bhow long\b|\birreversible\b|\brunway\b|\bweeks (remaining|left)\b/i;
+function tryLegacyAtRisk(q: string, ctx: CopilotContext): CopilotReply | null {
+  if (!/legacy/.test(q) || !/\b(at risk|stranded|left over|leftover|remain|most|excess)\b/.test(q)) return null;
+  const list = active(ctx)
+    .filter((t) => t.sellThrough.remainingUnits > 0)
+    .sort(
+      (a, b) =>
+        (b.sellThrough.remainingValue ?? b.sellThrough.remainingUnits) - (a.sellThrough.remainingValue ?? a.sellThrough.remainingUnits)
+    );
+  if (list.length === 0) return reply("No transition is projected to leave legacy stock behind at today's sell rates.");
+  const describe = (t: TransitionView) =>
+    `${t.name} ${n(t.sellThrough.remainingUnits)} units${t.sellThrough.remainingValue !== undefined ? ` (${fmtMoney(t.sellThrough.remainingValue, t.currency)})` : ""}`;
+  return reply(
+    `${plural(list.length, "transition")} are projected to leave legacy stock unsold when their sell-through window closes. ` +
+      `Most at risk: ${list.slice(0, 3).map(describe).join("; ")}.`,
+    { action: { kind: "navigate", href: "/transitions" }, visualsUpdated: ["SKU Transitions"] }
+  );
+}
 
-function tryRunway(question: string, ctx: CopilotContext): CopilotReply | null {
-  if (!RUNWAY_RE.test(question)) return null;
-  const situation = resolveSituation(question, ctx);
-  if (!situation) return needSituationReply(ctx);
-
-  const runway = situation.runway;
-  if (!runway.earliest) {
-    return {
-      text: `No decision markers are available for ${situation.title}.`,
-      action: { kind: "none" },
-      visualsUpdated: [],
-      unavailable: "No runway markers.",
-    };
+function tryMoveInventory(q: string, ctx: CopilotContext): CopilotReply | null {
+  if (!/\b(move|transfer|rebalanc|redistribut|shift)\w*\b/.test(q) || /\bdelay/.test(q)) return null;
+  const named = namedTransition(q, ctx.transitions);
+  const list = (named ? [named] : active(ctx))
+    .filter((t) => t.coverage.transfers.length > 0)
+    .sort((a, b) => b.coverage.transferUnits - a.coverage.transferUnits);
+  if (list.length === 0) {
+    return reply(
+      named ? `No ${named.name} store has stock to spare for a store that is running out.` : "No store-to-store transfer would prevent a stockout right now."
+    );
   }
-
-  const marker = runway.earliest;
-  return {
-    text: `${marker.label} is the earliest irreversible commitment for ${situation.title}, ${fmtWeeks(marker.weeksAway)}.${marker.detail ? ` ${marker.detail}.` : ""}`,
-    action: { kind: "none" },
-    visualsUpdated: ["Decision runway"],
-  };
+  const top = list[0]!;
+  const move = top.coverage.transfers[0];
+  const storeName = (id: string) => top.coverage.rows.find((r) => r.store.storeId === id)?.store.storeName ?? id;
+  const total = list.reduce((sum, t) => sum + t.coverage.transferUnits, 0);
+  return reply(
+    `${n(total)} units can move between stores across ${plural(list.length, "transition")} before buying more — ${list
+      .slice(0, 3)
+      .map((t) => `${t.name} ${n(t.coverage.transferUnits)}`)
+      .join(", ")}. ` +
+      (move
+        ? `For example, ${plural(move.units, "unit")} of ${move.skuId} from ${storeName(move.fromStoreId)} (${fmtNum1(move.fromCoverBefore)} wks) to ${storeName(move.toStoreId)} (${fmtNum1(move.toCoverBefore)} wks).`
+        : ""),
+    { action: { kind: "navigate", href: `/transitions/${encodeURIComponent(top.id)}` }, visualsUpdated: ["Store coverage"] }
+  );
 }
 
-/* ------------------------------------------------------------------ */
-/* Explain the gap                                                     */
-/* ------------------------------------------------------------------ */
-
-const EXPLAIN_RE = /\bgap\b|\bunresolved\b|how big|\brepresented\b|\bwhy\b/i;
-
-function tryExplainGap(question: string, ctx: CopilotContext): CopilotReply | null {
-  if (!EXPLAIN_RE.test(question)) return null;
-  const situation = resolveSituation(question, ctx);
-  if (!situation) return needSituationReply(ctx);
-
-  const { bridge } = situation;
-  return {
-    text: `${situation.title}: expected ${fmtMoney(bridge.expectedValue, bridge.currency)}, formal plan ${fmtMoney(bridge.formalValue, bridge.currency)}. Unresolved ${fmtMoney(bridge.unresolvedValue, bridge.currency)}, ${fmtPct(bridge.representedPct)} represented.`,
-    action: { kind: "none" },
-    visualsUpdated: ["Reconcile"],
-  };
+function tryAttention(q: string, ctx: CopilotContext): CopilotReply | null {
+  if (!/\b(attention|today|urgent|priorit\w*|first|what should i do|need(s)? me|need my)\b/.test(q)) return null;
+  const list = sortForAttention(ctx.transitions.filter((t) => t.status === "ACTION_NEEDED"));
+  if (list.length === 0) {
+    return reply("No transition needs action today. Every active transition has enough coverage for current demand and inbound supply.", {
+      action: { kind: "navigate", href: "/actions" },
+      visualsUpdated: ["Actions"],
+    });
+  }
+  return reply(
+    `${plural(list.length, "transition")} need action today. ` +
+      `First: ${list
+        .slice(0, 3)
+        .map((t) => `${t.name} — ${t.nextStep}`)
+        .join("; ")}.`,
+    { action: { kind: "navigate", href: "/actions" }, visualsUpdated: ["Actions"] }
+  );
 }
 
-/* ------------------------------------------------------------------ */
-/* Unknown                                                              */
-/* ------------------------------------------------------------------ */
-
-function unknownReply(): CopilotReply {
-  return {
-    text: 'I can explain a planning gap, open a page like Capacity or Materials, or update a scenario. Try "how big is the Halloween gap" or "open capacity".',
-    action: { kind: "none" },
-    visualsUpdated: [],
-  };
+function fallback(): CopilotReply {
+  return reply(
+    `I can answer from the transition data — try "${SUGGESTED_QUESTIONS[1]}", "${SUGGESTED_QUESTIONS[2]}" or "${SUGGESTED_QUESTIONS[6]}"`,
+    { unavailable: "Question not recognised." }
+  );
 }
 
-/* ------------------------------------------------------------------ */
-/* Entry point                                                         */
 /* ------------------------------------------------------------------ */
 
 export function respond(question: string, ctx: CopilotContext): CopilotReply {
-  const trimmed = question.trim();
-  if (!trimmed) return unknownReply();
-
+  const q = question.trim().toLowerCase();
+  if (!q) return fallback();
+  if (ctx.transitions.length === 0) return nothingLoaded();
   return (
-    tryDisposition(trimmed, ctx) ??
-    tryScenarioHours(trimmed, ctx) ??
-    tryScenarioLeadTime(trimmed, ctx) ??
-    tryNavigate(trimmed, ctx) ??
-    tryCapacity(trimmed, ctx) ??
-    tryMaterial(trimmed, ctx) ??
-    tryRunway(trimmed, ctx) ??
-    tryExplainGap(trimmed, ctx) ??
-    unknownReply()
+    tryNavigate(q, ctx) ??
+    tryDelay(q, ctx) ??
+    tryAvoidPurchasing(q, ctx) ??
+    trySubstitutability(q, ctx) ??
+    tryWhyOrdering(q, ctx) ??
+    tryStoresRunOut(q, ctx) ??
+    tryLegacyAtRisk(q, ctx) ??
+    tryMoveInventory(q, ctx) ??
+    tryAttention(q, ctx) ??
+    fallback()
   );
 }

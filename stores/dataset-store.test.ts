@@ -16,21 +16,12 @@ const { useDatasetStore, DATASET_STORAGE_KEY } = await import("./dataset-store")
 const { DEFAULT_DEMO_SEED } = await import("@/lib/dataset/demo/generate");
 
 const store = () => useDatasetStore.getState();
+const note = (text: string) => ({ actor: "James", text, at: "2026-10-05T09:00:00.000Z" });
 
 beforeEach(() => {
   localStore.clear();
   sessionStore.clear();
-  useDatasetStore.setState({
-    mode: null,
-    datasetId: "demo",
-    datasetName: "Demo planning data",
-    seed: DEFAULT_DEMO_SEED,
-    uploadedFileName: null,
-    uploadedAt: null,
-    hasStoredUpload: false,
-    activeSituationId: null,
-    overridesBySituation: {},
-  });
+  useDatasetStore.setState(useDatasetStore.getInitialState());
 });
 
 describe("mode selection", () => {
@@ -45,133 +36,107 @@ describe("mode selection", () => {
     expect(store().uploadedFileName).toBeNull();
   });
 
-  it("regenerating demo swaps the seed, which is what identifies the dataset", () => {
-    store().chooseDemo();
-    store().regenerateDemo("another-seed");
-    expect(store().seed).toBe("another-seed");
-    expect(store().datasetId).toBe("demo:another-seed");
+  it("choosing an upload records the file and marks it stored", () => {
+    store().chooseUpload({ fileName: "plan.xlsx", uploadedAt: "2026-10-05T09:00:00.000Z", datasetName: "plan", stored: true });
+    expect(store().mode).toBe("UPLOADED");
+    expect(store().hasStoredUpload).toBe(true);
+    expect(store().datasetId).toBe("upload:2026-10-05T09:00:00.000Z");
   });
 
-  it("choosing an upload records the file and marks it stored", () => {
-    store().chooseUpload({
-      fileName: "plan.xlsx",
-      uploadedAt: "2027-03-08T09:00:00.000Z",
-      datasetName: "plan",
-      stored: true,
-    });
-    expect(store().mode).toBe("UPLOADED");
-    expect(store().uploadedFileName).toBe("plan.xlsx");
-    expect(store().hasStoredUpload).toBe(true);
-    // The id changes with every upload, which is the signal to re-read storage.
-    expect(store().datasetId).toBe("upload:2027-03-08T09:00:00.000Z");
+  it("an upload that only reached this tab is not marked stored", () => {
+    store().chooseUpload({ fileName: "p.xlsx", uploadedAt: "x", datasetName: "p", stored: false });
+    expect(store().hasStoredUpload).toBe(false);
+  });
+});
+
+describe("planner decisions", () => {
+  it("setOverride merges into a transition and logs the decision", () => {
+    store().setOverride("TR-1001", { relationshipDecision: "CONFIRMED" }, note("Confirmed CS-1048 → CS-2841"));
+    store().setOverride("TR-1001", { safetyStockWeeks: 3 }, note("Safety stock 2 → 3 weeks"));
+    store().setOverride("TR-1002", { substitutabilityPct: 0.5 }, note("Substitutability 50%"));
+    expect(store().overridesByTransition["TR-1001"]).toEqual({ relationshipDecision: "CONFIRMED", safetyStockWeeks: 3 });
+    expect(store().overridesByTransition["TR-1002"]).toEqual({ substitutabilityPct: 0.5 });
+    expect(store().auditLog.map((a) => [a.transitionId, a.text, a.actor])).toEqual([
+      ["TR-1001", "Confirmed CS-1048 → CS-2841", "James"],
+      ["TR-1001", "Safety stock 2 → 3 weeks", "James"],
+      ["TR-1002", "Substitutability 50%", "James"],
+    ]);
+    expect(new Set(store().auditLog.map((a) => a.id)).size).toBe(3);
+  });
+
+  it("clearOverrides removes only the named keys, and is logged", () => {
+    store().setOverride("TR-1001", { safetyStockWeeks: 3, substitutabilityPct: 0.8 }, note("set"));
+    store().clearOverrides("TR-1001", ["safetyStockWeeks"], note("Reset safety stock"));
+    expect(store().overridesByTransition["TR-1001"]).toEqual({ substitutabilityPct: 0.8 });
+    expect(store().auditLog).toHaveLength(2);
+  });
+
+  it("records and reopens an action", () => {
+    store().setActionState("TR-1001:transfer", "TR-1001", { disposition: "DONE", at: "2026-10-05T09:00:00.000Z" }, note("Approved transfer"));
+    expect(store().actionStates["TR-1001:transfer"]?.disposition).toBe("DONE");
+    store().reopenAction("TR-1001:transfer", "TR-1001", note("Reopened"));
+    expect(store().actionStates["TR-1001:transfer"]).toBeUndefined();
+    expect(store().auditLog.map((a) => a.text)).toEqual(["Approved transfer", "Reopened"]);
   });
 });
 
 describe("switching source discards decisions made against the old data", () => {
-  // A disposition names a candidate item id from one dataset. Carrying those
-  // ids into a different dataset would silently attach a planner's decision to
-  // an unrelated item.
-  it("clears dispositions when moving from demo to an upload", () => {
-    store().chooseDemo();
-    store().setDisposition("halloween", "hi_1", "carry_forward");
-    expect(store().overridesBySituation.halloween?.dispositions.hi_1).toBe("carry_forward");
+  const decide = () => {
+    store().setOverride("TR-1001", { relationshipDecision: "CONFIRMED" }, note("c"));
+    store().setActionState("a", "TR-1001", { disposition: "DONE", at: "x" }, note("d"));
+  };
+  const expectClean = () => {
+    expect(store().overridesByTransition).toEqual({});
+    expect(store().actionStates).toEqual({});
+    expect(store().auditLog).toEqual([]);
+  };
 
+  it("moving from demo to an upload", () => {
+    store().chooseDemo();
+    decide();
     store().chooseUpload({ fileName: "p.xlsx", uploadedAt: "x", datasetName: "p", stored: true });
-    expect(store().overridesBySituation).toEqual({});
-    expect(store().activeSituationId).toBeNull();
+    expectClean();
   });
 
-  it("clears dispositions when regenerating the demo dataset", () => {
+  it("regenerating the demo", () => {
     store().chooseDemo();
-    store().setDisposition("halloween", "hi_1", "intentional_exit");
+    decide();
     store().regenerateDemo("fresh");
-    expect(store().overridesBySituation).toEqual({});
+    expectClean();
+  });
+
+  it("re-choosing the same demo keeps decisions", () => {
+    store().chooseDemo();
+    decide();
+    store().chooseDemo();
+    expect(store().overridesByTransition["TR-1001"]).toBeDefined();
   });
 
   it("clearDataset returns to the first-run state", () => {
-    store().chooseUpload({ fileName: "p.xlsx", uploadedAt: "x", datasetName: "p", stored: true });
-    store().setDisposition("s", "c", "carry_forward");
+    store().chooseDemo();
+    decide();
     store().clearDataset();
     expect(store().mode).toBeNull();
-    expect(store().hasStoredUpload).toBe(false);
-    expect(store().overridesBySituation).toEqual({});
-  });
-});
-
-describe("dispositions", () => {
-  it("records one decision without disturbing others", () => {
-    store().setDisposition("halloween", "hi_1", "carry_forward");
-    store().setDisposition("halloween", "hi_2", "intentional_exit");
-    store().setDisposition("holiday", "hi_9", "under_review");
-
-    expect(store().overridesBySituation.halloween?.dispositions).toEqual({
-      hi_1: "carry_forward",
-      hi_2: "intentional_exit",
-    });
-    expect(store().overridesBySituation.holiday?.dispositions).toEqual({ hi_9: "under_review" });
-  });
-
-  it("merges a bulk update over existing decisions", () => {
-    store().setDisposition("halloween", "hi_1", "carry_forward");
-    store().setDispositions("halloween", { hi_2: "already_represented", hi_1: "under_review" });
-    expect(store().overridesBySituation.halloween?.dispositions).toEqual({
-      hi_1: "under_review",
-      hi_2: "already_represented",
-    });
-  });
-
-  it("resets one situation without touching another", () => {
-    store().setDisposition("halloween", "hi_1", "carry_forward");
-    store().setDisposition("holiday", "hi_9", "carry_forward");
-    store().resetDispositions("halloween");
-    expect(store().overridesBySituation.halloween?.dispositions).toEqual({});
-    expect(store().overridesBySituation.holiday?.dispositions).toEqual({ hi_9: "carry_forward" });
-  });
-
-  it("keeps a match config alongside dispositions", () => {
-    store().setDisposition("halloween", "hi_1", "carry_forward");
-    store().setMatchConfig("halloween", { dimensions: [], threshold: 0.5 });
-    expect(store().overridesBySituation.halloween?.matchConfig?.threshold).toBe(0.5);
-    expect(store().overridesBySituation.halloween?.dispositions.hi_1).toBe("carry_forward");
-  });
-});
-
-describe("an upload that only reached this tab", () => {
-  it("is not marked as stored", () => {
-    store().chooseUpload({ fileName: "p.xlsx", uploadedAt: "x", datasetName: "p", stored: false });
-    expect(store().mode).toBe("UPLOADED");
-    expect(store().hasStoredUpload).toBe(false);
+    expectClean();
   });
 });
 
 describe("persistence", () => {
-  it("writes the chosen mode and decisions to local storage so a refresh keeps them", async () => {
+  it("persists the mode and decisions — never a derived number", () => {
     store().chooseDemo("persisted-seed");
-    store().setDisposition("halloween", "hi_1", "carry_forward");
-
-    const raw = localStore.getItem(`${DATASET_STORAGE_KEY}:test-account`);
-    expect(raw).not.toBeNull();
-    const parsed = JSON.parse(raw!) as { state: Record<string, unknown> };
-    expect(parsed.state.mode).toBe("DEMO");
+    store().setOverride("TR-1001", { safetyStockWeeks: 3 }, note("s"));
+    const parsed = JSON.parse(localStore.getItem(`${DATASET_STORAGE_KEY}:test-account`)!) as { state: Record<string, unknown> };
     expect(parsed.state.seed).toBe("persisted-seed");
-    expect(parsed.state.overridesBySituation).toEqual({
-      halloween: { dispositions: { hi_1: "carry_forward" } },
-    });
-  });
-
-  it("never persists a derived situation — only overrides", () => {
-    store().chooseDemo();
-    const parsed = JSON.parse(localStore.getItem(`${DATASET_STORAGE_KEY}:test-account`)!) as {
-      state: Record<string, unknown>;
-    };
+    expect(parsed.state.overridesByTransition).toEqual({ "TR-1001": { safetyStockWeeks: 3 } });
     expect(Object.keys(parsed.state).sort()).toEqual(
       [
-        "activeSituationId",
+        "actionStates",
+        "auditLog",
         "datasetId",
         "datasetName",
         "hasStoredUpload",
         "mode",
-        "overridesBySituation",
+        "overridesByTransition",
         "seed",
         "uploadedAt",
         "uploadedFileName",

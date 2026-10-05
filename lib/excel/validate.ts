@@ -13,21 +13,24 @@ import { normalizePlanningInput } from "@/lib/dataset/normalize";
 import { parseWorkbook } from "@/lib/excel/parse";
 import { applyMapping, planColumnMapping, type MappingPlan } from "@/lib/excel/column-mapping";
 import { REQUIRED_SHEETS, sheetSpec } from "@/lib/excel/schema";
-import type { DatasetCapabilities, PlanningDataset, RawPlanningInput, RawRow } from "@/types/dataset";
-import { ambiguousIdentityRows } from "@/lib/situations/volume";
+import { collectTransitions } from "@/lib/transitions/lineage";
+import type { DatasetCapabilities, PlanningDataset, RawPlanningInput } from "@/types/dataset";
 
-/** The compact review shown before "Run planning" (V2 §30). */
+/** The compact review shown before "Run planning". */
 export interface PlanningScopePreview {
-  periods: string[];
-  brands: string[];
-  historicalPeriods: string[];
-  currentItemCount: number;
-  historicalItemCount: number;
-  lineCount: number;
-  bomComponentCount: number;
-  eventsOrPrograms: string[];
-  capabilities: PlanningDataset["metadata"]["capabilities"];
-  /** Short planner-facing lines about what is unavailable, e.g. "Add BOM data to calculate material exposure." */
+  storeCount: number;
+  skuCount: number;
+  /** Rows on SKU_Transitions. */
+  explicitTransitionCount: number;
+  /** Everything Heizen will plan: explicit rows, JDA replacements and its own suggestions. */
+  plannedTransitionCount: number;
+  /** Of those, the relationships Heizen matched itself and you will be asked to confirm. */
+  suggestedTransitionCount: number;
+  /** Earliest and latest day covered by Sales_History, or null when there is none. */
+  salesFrom: string | null;
+  salesTo: string | null;
+  capabilities: DatasetCapabilities;
+  /** Short planner-facing lines about what is unavailable. */
   unavailable: string[];
 }
 
@@ -101,16 +104,7 @@ export function validateWorkbook(
     }
   }
 
-  const mappedSheets = applyMapping(parsed, plan);
-  const currencies = detectCurrencies(mappedSheets);
-  const currency = currencies[0] ?? "USD";
-  if (currencies.length > 1) {
-    collector.warn(
-      "Workbook",
-      "mixed_currency",
-      `Values are in ${currencies.join(", ")}. Heizen doesn't convert currency, so keep each programme in one currency.`
-    );
-  }
+  const mapped = applyMapping(parsed, plan);
 
   const input: RawPlanningInput = {
     metadata: {
@@ -120,33 +114,23 @@ export function validateWorkbook(
       sourceFileName: opts.fileName,
       createdAt: opts.planningNow,
       planningNow: opts.planningNow,
-      currency,
+      // The workbook carries no currency; JDA MMS figures are USD.
+      currency: "USD",
     },
-    businessPlans: mappedSheets.get("Business_Plan"),
-    currentPlanItems: mappedSheets.get("Current_Plan"),
-    historicalItems: mappedSheets.get("Historical_Items"),
-    boms: mappedSheets.get("BOM"),
-    lineCapacity: mappedSheets.get("Line_Capacity"),
-    itemLineMappings: mappedSheets.get("Item_Line_Mapping"),
-    leadTimeHistory: mappedSheets.get("Lead_Time_History"),
-    inventorySupply: mappedSheets.get("Inventory_Supply"),
-    readinessHistory: mappedSheets.get("Readiness_History"),
-    lineHistory: mappedSheets.get("Line_History"),
+    stores: mapped.get("Stores"),
+    skus: mapped.get("SKU_Master"),
+    transitions: mapped.get("SKU_Transitions"),
+    sales: mapped.get("Sales_History"),
+    inventory: mapped.get("Inventory"),
+    inbound: mapped.get("Inbound_Supply"),
+    currentPlan: mapped.get("Current_Plan"),
+    sellingProfiles: mapped.get("Selling_Profiles"),
+    history: mapped.get("Transition_History"),
   };
 
   // normalizePlanningInput raises all row-level issues itself into the same
   // collector — we never duplicate its checks here.
   const { dataset } = normalizePlanningInput(input, collector);
-
-  // Warned rather than merged: rows the attributes cannot tell apart are kept
-  // as separate products, but a planner should know why.
-  ambiguousIdentityRows(dataset.historicalItems).forEach(() =>
-    collector.warn(
-      "Historical_Items",
-      "ambiguous_identity",
-      "These prior items share every identifying attribute with another item in the same season, so they are told apart by item name. Check they aren't duplicates."
-    )
-  );
 
   for (const gap of capabilityGaps(dataset)) {
     collector.info(gap.sheet, gap.code, gap.message);
@@ -160,26 +144,6 @@ export function validateWorkbook(
 
 /* ------------------------------------------------------------------ */
 
-/** Every currency named in the value-bearing sheets, most used first. */
-function detectCurrencies(mappedSheets: Map<SheetName, RawRow[]>): string[] {
-  const counts = new Map<string, number>();
-  const sheetsToScan: SheetName[] = ["Business_Plan", "Current_Plan", "Historical_Items"];
-
-  for (const sheetName of sheetsToScan) {
-    for (const row of mappedSheets.get(sheetName) ?? []) {
-      const raw = row["currency"];
-      if (typeof raw === "string" && raw.trim() !== "") {
-        const value = raw.trim().toUpperCase();
-        counts.set(value, (counts.get(value) ?? 0) + 1);
-      }
-    }
-  }
-
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([value]) => value);
-}
-
 interface CapabilityGap {
   key: keyof DatasetCapabilities;
   sheet: SheetName | "Workbook";
@@ -189,40 +153,52 @@ interface CapabilityGap {
 
 const CAPABILITY_MESSAGES: readonly CapabilityGap[] = [
   {
-    key: "materials",
-    sheet: "BOM",
-    code: "capability_materials_unavailable",
-    message: "Add BOM data to calculate material exposure.",
+    key: "salesHistory",
+    sheet: "Sales_History",
+    code: "capability_sales_unavailable",
+    message: "No sales history — there is no legacy demand to carry into the successor.",
   },
   {
-    key: "capacity",
-    sheet: "Workbook",
-    code: "capability_capacity_unavailable",
-    message: "Capacity data not provided. Add Line_Capacity and Item_Line_Mapping to calculate line utilization.",
+    key: "storeLevelDemand",
+    sheet: "Sales_History",
+    code: "capability_store_demand_unavailable",
+    message: "Add store-level sales to see where stock will run out.",
   },
   {
-    key: "leadTimeAnalysis",
-    sheet: "Lead_Time_History",
-    code: "capability_leadtime_unavailable",
-    message: "Lead times fall back to your system assumption with no historical comparison.",
+    key: "storeInventory",
+    sheet: "Inventory",
+    code: "capability_store_inventory_unavailable",
+    message: "Add store inventory to see coverage by store and transfer recommendations.",
   },
   {
-    key: "netRequirements",
-    sheet: "Inventory_Supply",
-    code: "capability_netrequirements_unavailable",
-    message: "Material figures are shown as gross exposure only, never as a net procurement requirement.",
+    key: "dcInventory",
+    sheet: "Inventory",
+    code: "capability_dc_inventory_unavailable",
+    message: "No DC inventory — only store stock counts as supply.",
   },
   {
-    key: "readinessHistory",
-    sheet: "Readiness_History",
-    code: "capability_readinesshistory_unavailable",
-    message: "Add weekly readiness history to see this season's pace against last year's.",
+    key: "inboundSupply",
+    sheet: "Inbound_Supply",
+    code: "capability_inbound_unavailable",
+    message: "Inbound supply not included — recommendations count only stock on hand.",
   },
   {
-    key: "lineHistory",
-    sheet: "Line_History",
-    code: "capability_linehistory_unavailable",
-    message: "Add Line_History to see each line's past downtime, overtime and late material arrivals.",
+    key: "currentPlan",
+    sheet: "Current_Plan",
+    code: "capability_current_plan_unavailable",
+    message: "Add Current_Plan to compare JDA's plan with Heizen's view.",
+  },
+  {
+    key: "sellingProfiles",
+    sheet: "Selling_Profiles",
+    code: "capability_profiles_unavailable",
+    message: "Add Selling_Profiles to see which at-risk stores JDA will not replenish automatically.",
+  },
+  {
+    key: "unitCosts",
+    sheet: "SKU_Master",
+    code: "capability_unit_costs_unavailable",
+    message: "Add unit_cost to every transitioning SKU to see inventory and purchasing value.",
   },
 ];
 
@@ -231,34 +207,21 @@ function capabilityGaps(dataset: PlanningDataset): CapabilityGap[] {
 }
 
 function buildScopePreview(dataset: PlanningDataset): PlanningScopePreview {
-  const periods = [...new Set(dataset.currentPlanItems.map((r) => r.planningPeriod))].sort();
-  const historicalPeriods = [...new Set(dataset.historicalItems.map((r) => r.historicalPeriod))].sort();
-  const brands = [
-    ...new Set([
-      ...dataset.businessPlans.map((r) => r.brand),
-      ...dataset.currentPlanItems.map((r) => r.brand),
-      ...dataset.historicalItems.map((r) => r.brand),
-    ]),
-  ].sort();
-  const eventsOrPrograms = [
-    ...new Set(
-      [
-        ...dataset.businessPlans.map((r) => r.eventOrProgram),
-        ...dataset.currentPlanItems.map((r) => r.eventOrProgram),
-        ...dataset.historicalItems.map((r) => r.eventOrProgram),
-      ].filter((v): v is string => Boolean(v))
-    ),
-  ].sort();
-
+  const planned = collectTransitions(dataset);
+  let salesFrom: string | null = null;
+  let salesTo: string | null = null;
+  for (const row of dataset.sales) {
+    if (salesFrom === null || row.periodStart < salesFrom) salesFrom = row.periodStart;
+    if (salesTo === null || row.periodEnd > salesTo) salesTo = row.periodEnd;
+  }
   return {
-    periods,
-    brands,
-    historicalPeriods,
-    currentItemCount: dataset.currentPlanItems.length,
-    historicalItemCount: dataset.historicalItems.length,
-    lineCount: new Set(dataset.lineCapacity.map((r) => r.lineId)).size,
-    bomComponentCount: new Set(dataset.boms.map((r) => r.componentId)).size,
-    eventsOrPrograms,
+    storeCount: dataset.stores.length,
+    skuCount: dataset.skus.length,
+    explicitTransitionCount: dataset.transitions.length,
+    plannedTransitionCount: planned.length,
+    suggestedTransitionCount: planned.filter((t) => t.source === "SUGGESTED").length,
+    salesFrom,
+    salesTo,
     capabilities: dataset.metadata.capabilities,
     unavailable: capabilityGaps(dataset).map((gap) => gap.message),
   };

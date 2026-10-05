@@ -9,8 +9,7 @@ beforeAll(() => {
 });
 
 const { useDatasetStore, DATASET_STORAGE_KEY } = await import("./dataset-store");
-const { useSituationScenarioStore } = await import("./situation-scenario-store");
-const { useCapacityScenarioStore, CAPACITY_SCENARIO_STORAGE_KEY } = await import("./capacity-scenario-store");
+const { useScenarioStore, SCENARIO_STORAGE_KEY } = await import("./scenario-store");
 const { bindPlanningStorage, removePlanningDataForAccount } = await import("./storage-scope");
 
 const ALICE = namespaceFor("alice@example.com");
@@ -23,8 +22,7 @@ const dataset = () => useDatasetStore.getState();
 beforeEach(async () => {
   await bindPlanningStorage(null);
   useDatasetStore.setState(useDatasetStore.getInitialState());
-  useSituationScenarioStore.setState(useSituationScenarioStore.getInitialState());
-  useCapacityScenarioStore.setState(useCapacityScenarioStore.getInitialState());
+  useScenarioStore.setState(useScenarioStore.getInitialState());
   localStore.clear();
 });
 
@@ -61,25 +59,28 @@ describe("planning storage is scoped to the signed-in account", () => {
   it("clears the previous account's state even when the next account has nothing stored", async () => {
     await bindPlanningStorage(ALICE);
     dataset().chooseDemo("alice-seed");
-    dataset().setDisposition("halloween", "sku::a", "carry_forward");
-    useSituationScenarioStore.getState().createScenario("halloween", "Alice's", "2027-03-08T09:00:00.000Z");
+    const note = { actor: "Alice", text: "Confirmed", at: "2026-10-05T09:00:00.000Z" };
+    dataset().setOverride("TR-1001", { relationshipDecision: "CONFIRMED" }, note);
+    useScenarioStore.getState().setLever("TR-1001", "inboundDelayWeeks", 2);
 
     await bindPlanningStorage(BOB);
     expect(dataset().mode).toBeNull();
-    expect(dataset().overridesBySituation).toEqual({});
-    expect(useSituationScenarioStore.getState().scenarios).toEqual({});
+    expect(dataset().overridesByTransition).toEqual({});
+    expect(dataset().auditLog).toEqual([]);
+    expect(useScenarioStore.getState().drafts).toEqual({});
   });
 
-  it("scopes capacity scenarios to the account too", async () => {
+  it("scopes simulator scenarios to the account too", async () => {
     await bindPlanningStorage(ALICE);
-    const id = useCapacityScenarioStore.getState().createScenario("Alice plant plan", "2027-03-08T09:00:00.000Z");
-    expect(localStore.getItem(`${CAPACITY_SCENARIO_STORAGE_KEY}:${ALICE}`)).toContain("Alice plant plan");
+    useScenarioStore.getState().setLever("TR-1001", "inboundDelayWeeks", 2);
+    const id = useScenarioStore.getState().saveScenario("TR-1001", "Alice delay case", "2026-10-05T09:00:00.000Z");
+    expect(localStore.getItem(`${SCENARIO_STORAGE_KEY}:${ALICE}`)).toContain("Alice delay case");
 
     await bindPlanningStorage(BOB);
-    expect(useCapacityScenarioStore.getState().scenarios).toEqual({});
+    expect(useScenarioStore.getState().saved).toEqual({});
 
     await bindPlanningStorage(ALICE);
-    expect(useCapacityScenarioStore.getState().scenarios[id]?.name).toBe("Alice plant plan");
+    expect(useScenarioStore.getState().saved[id]?.name).toBe("Alice delay case");
   });
 
   it("drops data stored before storage was scoped rather than handing it to whoever signs in", async () => {

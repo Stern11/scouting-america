@@ -21,27 +21,27 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  CheckSquare,
-  FlaskConical,
+  ArrowRightLeft,
+  ListChecks,
   LayoutGrid,
-  Layers,
   PanelLeftClose,
   PanelLeftOpen,
+  SlidersHorizontal,
 } from "lucide-react";
 import { useAppStore } from "@/stores/app-store";
 import { cn } from "@/lib/utils/cn";
 import { UserMenu } from "./user-menu";
 
 /**
- * Four destinations. Capacity, materials, methodology and integrations are
- * steps inside the workspace flow rather than modules of their own — a planner
- * navigates a situation, not a taxonomy.
+ * Four destinations. Lineage, demand, inventory, store coverage and
+ * replenishment are steps inside one transition rather than modules of their
+ * own — a planner navigates a product transition, not a taxonomy.
  */
 const PRIMARY_NAV = [
   { href: "/overview", label: "Overview", icon: LayoutGrid },
-  { href: "/workspace", label: "Planning Workspace", icon: Layers },
-  { href: "/scenario-lab", label: "Scenario Lab", icon: FlaskConical },
-  { href: "/decisions", label: "Decisions", icon: CheckSquare },
+  { href: "/transitions", label: "SKU Transitions", icon: ArrowRightLeft },
+  { href: "/simulator", label: "Planning Simulator", icon: SlidersHorizontal },
+  { href: "/actions", label: "Actions", icon: ListChecks },
 ];
 
 export function Sidebar({
@@ -79,8 +79,9 @@ export function Sidebar({
           H
         </span>
         {!collapsed ? (
-          <span className="truncate text-[14px] font-semibold tracking-tight text-[var(--text-primary)]">
-            Heizen
+          <span className="min-w-0 leading-tight">
+            <span className="block truncate text-[14px] font-semibold tracking-tight text-[var(--text-primary)]">Heizen</span>
+            <span className="block truncate text-[10.5px] text-[var(--text-muted)]">Scout Shop planning</span>
           </span>
         ) : null}
       </div>
@@ -117,7 +118,7 @@ export function Sidebar({
 
       {!collapsed ? (
         <p className="px-4 pb-3 text-[11px] leading-snug text-[var(--text-muted)]">
-          Plan what your formal plan cannot see yet.
+          Plan across product transitions, not just individual SKUs.
         </p>
       ) : null}
 

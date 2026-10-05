@@ -9,6 +9,14 @@ const nextConfig: NextConfig = {
   eslint: {
     dirs: ["app", "components", "lib", "data", "stores", "types"],
   },
+  // The previous generation's destinations, kept reachable for old links.
+  async redirects() {
+    return [
+      { source: "/workspace/:path*", destination: "/transitions", permanent: false },
+      { source: "/scenario-lab", destination: "/simulator", permanent: false },
+      { source: "/decisions", destination: "/actions", permanent: false },
+    ];
+  },
 };
 
 export default nextConfig;

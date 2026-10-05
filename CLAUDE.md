@@ -1,141 +1,98 @@
 @Heizen_Planning_Gap_Intelligence_PRD.md
 
-# Heizen — engineering guide (V2)
+# Heizen — engineering guide (Scouting America · SKU Transition Intelligence)
 
-The PRD above is the original product context and is still the reference for
-planning methodology, the confidence model, and the domain vocabulary.
-
-**The V2 direction below supersedes the PRD's information architecture and
-product framing where they conflict.** V1 became too broad; V2 narrows to one
-job. Don't reintroduce the V1 IA because the PRD describes it.
+The PRD above is the original (Hershey) product context. It is still useful
+for the house principles — explainability, planner control, honest
+degradation — but **its information architecture, domain model and demo story
+are superseded by this file.** Don't reintroduce planning gaps, BOMs,
+materials, line capacity or the V1/V2 navigation because the PRD describes
+them.
 
 See `docs/architecture.md` for the layer-by-layer map.
 
 ## What this product is
 
-Heizen helps a planner manage **future business that is not yet represented at
-item / SKU level in the formal planning stack** — seasonal assortments, annual
-graphic refreshes, retailer packs, renovations, launches, pack-size changes,
-business targets known above SKU level.
+Heizen plans **continuity across SKU transitions** for a merchandise planner
+on JDA MMS. When a legacy SKU is replaced (Scouting America's rebrand is the
+driver), JDA sees two unrelated records; the business sees one product.
 
-> Plan what your formal plan cannot see yet.
->
-> Reconcile unresolved future business, understand what can already be planned,
-> and see the material and capacity impact before the finished item exists.
+> Plan across product transitions, not just individual SKUs.
 
-The value is **reconciliation + structured visibility + downstream planning
-impact + scenario analysis**. Heizen is not a better forecasting engine, not an
-autonomous SKU predictor, and not a replacement for SAP, Kinaxis or Aera.
-
-Primary persona: one Supply / Material Planning Lead (or S&OP Lead) with full
-access. No RBAC yet, but keep the data model RBAC-compatible.
+Heizen connects legacy and successor SKUs, carries legacy demand forward,
+reconciles usable inventory across the DC and ~120 stores, and recommends
+what to order, hold or transfer. It is not a forecasting replacement, not
+MRP, not a JDA replacement. Primary persona: one supply / merchandise
+planner (demo persona "James").
 
 ## Information architecture
 
-Four destinations, nothing more:
+Four destinations, nothing more: **Overview · SKU Transitions · Planning
+Simulator · Actions**, plus Ask Heizen in the top bar.
 
-**Overview · Planning Workspace · Scenario Lab · Decisions**
-
-Capacity, materials, methodology, planning assumptions and integrations are
-steps *inside* the workflow, not modules of their own. A planner navigates a
-situation, not a taxonomy.
-
-The workflow inside a situation is **Reconcile → Plan Supply → Check Capacity →
-Decide**.
+Inside one transition the chain is fixed:
+**Lineage → Demand continuity → Network inventory → Store coverage →
+Replenishment → Rebalancing → Planner action.**
 
 ## Two data modes
 
-`DEMO` (seeded synthetic) and `UPLOADED` (a planner's `.xlsx`). Both normalize
-into the same `PlanningDataset` and get the identical product experience — only
-the input adapter differs. Never build a demo-only or upload-only screen.
-
-Demo data is CPG/confectionery-flavoured but **synthetic**. Never present it as
-any real company's data, and never use a real brand name.
+`DEMO` (seeded synthetic Scouting America network) and `UPLOADED` (a
+planner's `.xlsx` of JDA exports). Both normalize into the same
+`PlanningDataset`; `lib/dataset/adapter-parity.test.ts` proves it. Never build
+a demo-only or upload-only screen. Demo data uses the customer's program
+vocabulary but every number is synthetic — label it so, never present it as
+Scouting America's real data.
 
 ## Non-negotiable principles
 
-- **One screen, one question.** Overview: what needs attention? Reconcile: what
-  isn't represented? Plan Supply: what can I plan now? Capacity: where does it
-  hit? Scenario: what changes if I change assumptions? Decide: what should I do?
-- **Everything reconciles to one number.** `bridge.validatedUnits` — the units
-  the planner accepted as carrying forward — drives capacity hours, material
-  requirements and decision dates. If a page shows a figure that cannot be
-  traced back to it, that page is wrong.
-- **Only `carry_forward` bears load.** `already_represented` is in the formal
-  plan, `intentional_exit` is gone, `under_review` is undecided. Counting any of
-  them overstates the plan.
-- **Matching explains itself.** Show which attributes matched and which
-  differed, never a bare similarity percentage. Representation is assigned
-  one-to-one: a plan item can only stand for one prior item.
-- **Scenario overrides never touch the baseline.** They apply to a copy of the
-  dataset; the derived result is recomputed, never persisted. An uploaded
-  workbook is never rewritten. AI changes go to scenario or decision state.
-- **Preserve uncertainty and never fabricate precision.** A missing sheet
-  degrades one analysis and says so ("Add BOM data to calculate material
-  exposure."); it never yields a plausible-looking placeholder.
-- **Never imply uncertain packaging can be ordered** because stable raw
-  ingredients are predictable.
-- **Uploaded data stays in the browser.** Parse client-side; never send workbook
-  contents to a server, an LLM, or analytics.
+- **Item identity is not business continuity.** A transition, not a SKU, is
+  the unit every page plans.
+- **Never double count.** Continuity baseline = legacy units × transferred
+  share + successor units, each sale counted once. Never carry legacy history
+  *and* add a successor forecast on top. One-to-many splits demand by shares
+  that sum to one; many-to-one sums predecessors.
+- **Never blindly sum inventory.** Usable legacy = legacy available ×
+  substitutability (0 if blocked). Supply = usable legacy + successor
+  available + inbound inside the horizon.
+- **Replenishment shows its math** and is never negative. The "ignoring
+  legacy" figure is the comparison; the difference is *deferred or avoided*
+  purchasing — never "savings". Extrapolation across the portfolio is always
+  labelled illustrative.
+- **Actions are derived, never registered**, and carry reasons + calculation.
+  Priority is rules (Critical/High/Medium/Monitor), not a mystery score.
+- **The system recommends; the planner controls.** Overrides (successor,
+  substitutability, transferred demand, demand, safety stock, order) live in
+  `stores/dataset-store.ts` with an audit entry each.
+- **Scenarios never touch the baseline.** Simulator levers are drafts in
+  `stores/scenario-store.ts`; results are rebuilt, never stored. Adopting a
+  scenario writes planner overrides — but a supplier delay is never adopted.
+- **Honest degradation.** Missing store sales, store inventory, inbound,
+  Current_Plan or costs degrade one analysis and say so ("Not available"),
+  never a zero.
+- **Dates come from `dataset.metadata.planningNow`**, never the machine clock
+  in planning math. Uploaded data stays in the browser.
 
 ## Visual rules
 
-V1 was too text-heavy, too busy, too much like a dashboard. Every screen must be
-understandable in 5–10 seconds.
-
-- **Do not solve UI confusion by adding explanation.** If the interface needs
-  paragraphs, redesign the interface.
-- Page subtitle: one short line. Primary insight: one sentence. Card
-  description: one line. Detail belongs in a drawer, tooltip or "why?".
-- One hero number per screen; supporting figures sized well below it.
-- Prefer open analytical layout, section rules and metric bands. Cards are for
-  actual semantic objects, not for every block.
-- Four planner-facing states only: **Action needed · Monitor · Forming ·
-  Reconciled**. Don't show severity, type, methodology, confidence and status at
-  once.
-- Colour comes from CSS custom properties only. Risk tokens
-  (positive/warning/critical) and planning-state tokens
-  (formal/validated/inferred/scenario/historical/unknown) are structurally
-  separate — never reuse one for the other. See the header of `app/globals.css`.
-- Signature visuals: business-to-plan bridge, item reconciliation, material
-  readiness, effective-capacity matrix, decision runway, scenario comparison.
+Every screen understandable in 5–10 seconds; don't fix confusion with
+paragraphs. Five planner-facing states only: **Action needed · Monitor ·
+Transitioning · Healthy · Complete.** Colour from CSS custom properties only;
+risk tokens, **lineage tokens (legacy tan / successor navy / inbound teal)**
+and planning-state tokens are structurally separate — see `app/globals.css`.
+Signature visuals: the continuity layer, transition bar, store coverage +
+transfers, replenishment waterfall, baseline-vs-scenario table.
 
 ## What NOT to do
 
-- Don't put planning calculations in a React component. Derived numbers come
-  from `lib/situations/*` (pure, no React imports).
-- Don't use `Math.random()` or `Date.now()` in data generation. Everything
-  derives from a seed and from `dataset.metadata.planningNow`.
-- Don't import `lib/excel/template.ts` (ExcelJS, Node-only) into a client
-  component. It is served by `app/api/planning-template`.
-- Don't let a provisional assumption double-count once formal demand arrives.
-  A prior item matched to a plan item is `already_represented` and bears no
-  load; representation is one-to-one (`lib/situations/matching.ts`). Never
-  add a second path that counts provisional and formal load side by side.
-- Don't conflate production timing and sales timing. They are separate windows
-  and must stay separate wherever both are shown.
-- Don't require a placeholder finished SKU to use the product. Unresolved load
-  is modelled outside the item master.
-- Don't build ERP writebacks, real auth, RBAC UI, an APS/finite scheduler, or
-  any live integration.
-
-## Build discipline
-
-Before implementing a feature, work through these, then code:
-
-1. **Planning question** — what is the planner trying to answer?
-2. **Required inputs** — which `PlanningDataset` rows, which overrides?
-3. **Matching / methodology** — what makes this defensible, and how is it shown?
-4. **Planner actions** — what can they change, dismiss, validate, approve?
-5. **Derived outputs** — which `lib/situations/*` function computes it?
-6. **Visual** — which existing component fits — `components/shared/*`, or the page's own
-   `components/<page>/` folder?
-7. **Scenario variables** — which `ScenarioAdjustments` category, which store
-   action?
+- No planning calculations in React components — derived numbers come from
+  `lib/transitions/*` (pure). Display arithmetic only.
+- No `Math.random()` / `Date.now()` in data generation or planning math.
+- Don't import `lib/excel/template.ts` (ExcelJS, Node-only) into the client.
+- No manufacturing, BOM, capacity or material language in the product.
+- No ERP/JDA writeback, real auth, RBAC UI or live integrations.
 
 ## Stack
 
 Next.js (App Router) + TypeScript (strict, `noUncheckedIndexedAccess`) +
-Tailwind v4 + hand-written shadcn-style components in `components/ui` + Zustand.
-ExcelJS (server, template generation) + SheetJS (browser, parsing).
-No database, no real auth, no production integrations.
+Tailwind v4 + hand-written shadcn-style components + Zustand + Vitest.
+ExcelJS (server, template) + SheetJS (browser, parsing).

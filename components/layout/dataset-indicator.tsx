@@ -20,7 +20,7 @@ export function DatasetIndicator() {
   const isDemo = mode === "DEMO";
   const label = isDemo ? "Demo data" : "Your data";
   const detail = isDemo
-    ? "Synthetic planning dataset"
+    ? "Synthetic Scouting America network — not real data"
     : (fileName ?? dataset?.metadata.sourceFileName ?? "Uploaded workbook");
 
   return (

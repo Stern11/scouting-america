@@ -10,17 +10,15 @@
 import { scopedKey, setStorageNamespace, storageNamespace } from "@/lib/utils/storage-scope";
 import { clearUnscopedUpload, clearUploadedDataset } from "@/lib/dataset/storage";
 import { DATASET_STORAGE_KEY, useDatasetStore } from "./dataset-store";
-import { SITUATION_SCENARIO_STORAGE_KEY, useSituationScenarioStore } from "./situation-scenario-store";
-import { CAPACITY_SCENARIO_STORAGE_KEY, useCapacityScenarioStore } from "./capacity-scenario-store";
+import { SCENARIO_STORAGE_KEY, useScenarioStore } from "./scenario-store";
 import { webStorage } from "./persist-storage";
 
-const PLANNING_KEYS = [DATASET_STORAGE_KEY, SITUATION_SCENARIO_STORAGE_KEY, CAPACITY_SCENARIO_STORAGE_KEY];
+const PLANNING_KEYS = [DATASET_STORAGE_KEY, SCENARIO_STORAGE_KEY];
 
 /** Back to first-run state in memory. Only ever called with storage detached. */
 function resetPlanningState(): void {
   useDatasetStore.setState(useDatasetStore.getInitialState());
-  useSituationScenarioStore.setState(useSituationScenarioStore.getInitialState());
-  useCapacityScenarioStore.setState(useCapacityScenarioStore.getInitialState());
+  useScenarioStore.setState(useScenarioStore.getInitialState());
 }
 
 /**
@@ -48,8 +46,7 @@ export async function bindPlanningStorage(namespace: string | null): Promise<voi
 
   await Promise.all([
     useDatasetStore.persist.rehydrate(),
-    useSituationScenarioStore.persist.rehydrate(),
-    useCapacityScenarioStore.persist.rehydrate(),
+    useScenarioStore.persist.rehydrate(),
   ]);
 }
 

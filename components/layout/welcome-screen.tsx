@@ -20,7 +20,7 @@
 
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Layers, LineChart, LogIn, ShieldCheck } from "lucide-react";
+import { ArrowRightLeft, LogIn, ShieldCheck, Store } from "lucide-react";
 import { signIn as oauthSignIn } from "next-auth/react";
 import { useCurrentUser } from "@/components/layout/use-current-user";
 import { cn } from "@/lib/utils/cn";
@@ -66,24 +66,22 @@ function Welcome() {
           </div>
 
           <h1 className="max-w-[520px] text-[28px] font-semibold leading-[1.15] tracking-[-0.025em] text-[var(--text-primary)] sm:text-[36px]">
-            Plan what your formal plan cannot see yet.
+            Plan across product transitions, not just individual SKUs.
           </h1>
           <p className="mt-4 max-w-[520px] text-[15px] leading-relaxed text-[var(--text-secondary)]">
-            Seasonal ranges, renovations and retailer packs are real long before they exist as items.
-            Heizen reconciles what is missing, and shows the line hours and material dates it commits
-            you to — before the finished product exists.
+            JDA sees an old SKU and a new one. Your business sees the same shirt. Heizen plans them as
+            one continuous product — demand, inventory and replenishment.
           </p>
 
           <ul className="mt-9 flex flex-col gap-4">
-            <Point icon={Layers} title="See what is not represented">
-              Every prior product with nothing in this year&rsquo;s plan, and what it is worth.
+            <Point icon={ArrowRightLeft} title="Carry demand across the SKU change">
+              Years of legacy history become the successor&rsquo;s baseline — counted once, never twice.
             </Point>
-            <Point icon={LineChart} title="Follow it through to consequence">
-              The hours it puts on a line, the components it puts on the clock, and the date each
-              stops being reversible.
+            <Point icon={Store} title="See usable stock across every store">
+              Legacy units that can still sell, where they sit, and which stores run out first.
             </Point>
-            <Point icon={ShieldCheck} title="Decide without committing the plan">
-              Test a volume, then add it as a governed assumption. Your workbook is never rewritten.
+            <Point icon={ShieldCheck} title="Order, hold or transfer — with the math shown">
+              Every recommendation shows its calculation. Your data is never rewritten.
             </Point>
           </ul>
         </div>
@@ -146,7 +144,7 @@ function Point({
   title,
   children,
 }: {
-  icon: typeof Layers;
+  icon: typeof Store;
   title: string;
   children: React.ReactNode;
 }) {

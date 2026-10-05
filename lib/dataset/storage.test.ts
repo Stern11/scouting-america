@@ -4,7 +4,7 @@ import { generateDemoDataset } from "./demo/generate";
 import { clearUploadedDataset, loadUploadedDataset, probePersistence, saveUploadedDataset } from "./storage";
 
 // Node has no IndexedDB, which is exactly the "storage refused the write" case.
-const dataset = generateDemoDataset({ planningNow: "2027-03-08T09:00:00.000Z" });
+const dataset = generateDemoDataset({ planningNow: "2026-10-05T09:00:00.000Z" });
 
 afterEach(() => setStorageNamespace(null));
 

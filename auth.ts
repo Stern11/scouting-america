@@ -23,10 +23,13 @@ import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 // import Google from "next-auth/providers/google";
 
-/** The one identity the demo signs in as. Never a real person. */
+/**
+ * The one identity the demo signs in as: the planner persona of the Scouting
+ * America walkthrough. A shared demo account — it authenticates nothing.
+ */
 export const DEMO_ACCOUNT = {
   id: "demo-planner",
-  name: "Demo Planner",
+  name: "James",
   email: "demo.planner@heizen.demo",
 } as const;
 
@@ -55,6 +58,12 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
   session: { strategy: "jwt" },
   pages: { signIn: "/welcome" },
   callbacks: {
+    // A session issued before the persona was renamed still carries the old
+    // name in its token; the demo account always reads as the current persona.
+    async session({ session, token }) {
+      if (token.sub === DEMO_ACCOUNT.id && session.user) session.user.name = DEMO_ACCOUNT.name;
+      return session;
+    },
     // Trust only our own paths, so a crafted `callbackUrl` cannot bounce a
     // planner off to somewhere else after signing in.
     async redirect({ url, baseUrl }) {

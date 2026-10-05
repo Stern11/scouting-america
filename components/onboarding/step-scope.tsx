@@ -1,5 +1,5 @@
 /**
- * Step 5 — Scope preview (V2 §12, §30).
+ * Step 5 — Scope preview.
  *
  * The compact review before committing: what Heizen found in the workbook,
  * and — honestly, not alarmingly — what it can't yet answer because a sheet
@@ -10,24 +10,9 @@
 
 import { Info, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { MetricRow } from "@/components/shared/page";
 import type { PlanningScopePreview } from "@/lib/excel/validate";
-
-function ChipList({ items }: { items: string[] }) {
-  if (items.length === 0) {
-    return <span className="text-[12.5px] text-[var(--text-muted)]">None</span>;
-  }
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {items.map((item) => (
-        <Badge key={item} variant="neutral">
-          {item}
-        </Badge>
-      ))}
-    </div>
-  );
-}
+import { fmtDateShort } from "@/lib/utils/format";
 
 export function StepScope({
   scope,
@@ -45,46 +30,36 @@ export function StepScope({
   return (
     <div>
       <p className="max-w-[560px] text-[13px] leading-relaxed text-[var(--text-secondary)]">
-        Here&apos;s what Heizen found in your workbook before it becomes your planning dataset.
+        Here&apos;s what Heizen found in your workbook before it starts planning your transitions.
       </p>
 
       <div className="mt-6">
         <MetricRow
           items={[
-            { label: "Current items", value: scope.currentItemCount.toLocaleString() },
-            { label: "Historical items", value: scope.historicalItemCount.toLocaleString() },
-            { label: "Lines", value: scope.lineCount.toLocaleString() },
-            { label: "BOM components", value: scope.bomComponentCount.toLocaleString() },
+            {
+              label: "Transitions to plan",
+              value: scope.plannedTransitionCount.toLocaleString(),
+              sub:
+                scope.suggestedTransitionCount > 0
+                  ? `${scope.suggestedTransitionCount} matched by Heizen — you confirm them`
+                  : `${scope.explicitTransitionCount.toLocaleString()} from SKU_Transitions`,
+            },
+            { label: "SKUs", value: scope.skuCount.toLocaleString() },
+            { label: "Stores", value: scope.storeCount.toLocaleString() },
+            {
+              label: "Sales history",
+              value: scope.salesFrom && scope.salesTo ? `${fmtDateShort(scope.salesFrom)} – ${fmtDateShort(scope.salesTo)}` : "None",
+            },
           ]}
         />
       </div>
 
-      <div className="mt-7 space-y-5">
-        <div>
-          <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
-            Planning periods
-          </span>
-          <ChipList items={scope.periods} />
-        </div>
-        <div>
-          <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
-            Historical periods
-          </span>
-          <ChipList items={scope.historicalPeriods} />
-        </div>
-        <div>
-          <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
-            Brands
-          </span>
-          <ChipList items={scope.brands} />
-        </div>
-        <div>
-          <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
-            Events / programs
-          </span>
-          <ChipList items={scope.eventsOrPrograms} />
-        </div>
-      </div>
+      {scope.plannedTransitionCount === 0 ? (
+        <p className="mt-6 max-w-[560px] text-[12.5px] text-[var(--text-secondary)]">
+          No transitions found. Add a SKU_Transitions sheet, fill replacement_sku_id on the SKU master, or mark
+          legacy SKUs DISCONTINUED so Heizen can match them to their successors.
+        </p>
+      ) : null}
 
       {scope.unavailable.length > 0 ? (
         <div className="mt-7 space-y-2 border-t border-[var(--border)] pt-5">
@@ -109,7 +84,7 @@ export function StepScope({
         </Button>
         <Button size="lg" onClick={onRunPlanning} disabled={saving}>
           {saving ? <Loader2 className="size-4 animate-spin" /> : null}
-          Run planning
+          Plan transitions
         </Button>
       </div>
     </div>

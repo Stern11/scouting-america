@@ -14,14 +14,14 @@ export function StepTemplate({ onContinue }: { onContinue: () => void }) {
   return (
     <div>
       <p className="max-w-[560px] text-[13px] leading-relaxed text-[var(--text-secondary)]">
-        Download the planning template, fill in your data on each sheet, then upload the file back here.
+        Download the template, paste in your JDA MMS exports — stores, SKU master, sales, inventory, open POs — and list which legacy SKUs became which successors. Then upload it back here.
       </p>
 
       <div className="mt-6 flex flex-wrap items-center gap-3">
         <Button asChild size="lg">
           <a href="/api/planning-template" download>
             <Download className="size-4" />
-            Download planning template
+            Download transition template
           </a>
         </Button>
         <Button variant="ghost" onClick={onContinue}>

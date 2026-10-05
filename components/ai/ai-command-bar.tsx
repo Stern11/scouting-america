@@ -8,42 +8,30 @@ import { Button } from "@/components/ui/button";
 import { VoiceButton } from "./voice-button";
 import { useDataset } from "@/components/dataset/dataset-provider";
 import { useDatasetStore } from "@/stores/dataset-store";
-import { useSituationScenarioStore } from "@/stores/situation-scenario-store";
-import { useCapacityScenarioStore } from "@/stores/capacity-scenario-store";
-import { respond, type CopilotAction, type CopilotContext, type CopilotReply } from "@/lib/copilot";
-import type { ContributorDisposition } from "@/types/situation";
+import { useScenarioStore } from "@/stores/scenario-store";
+import { respond, SUGGESTED_QUESTIONS, type CopilotAction, type CopilotContext, type CopilotReply } from "@/lib/copilot";
 
 /**
- * The "Ask Heizen" entry point, live on every route — the V2 build.
+ * "Ask Heizen", live on every route.
  *
- * The product moved to the V2 `PlanningSituation` model, but this bar kept
- * answering from `lib/ai-copilot/*`, the V1 engine grounded in
- * `calculateScenario()` over `data/synthetic/*` — a different generation of
- * data. The planner could be looking at a V2 Capacity page and ask the top
- * bar "why is line 03 red" and get back a number from a different dataset
- * entirely. This bar now submits into `lib/copilot/respond.ts`, which is
- * grounded only in the `PlanningSituation` objects `useDataset()` already
- * built for the page on screen — a reply here can never disagree with what
- * the page already shows.
+ * Answers come from `lib/copilot/respond.ts`, grounded only in the
+ * `TransitionView`s `useDataset()` already built for the page on screen — a
+ * reply here can never disagree with what the page shows.
  *
  * A returned action is executed here, and only here: `navigate` pushes a
- * route; `set_disposition` writes to `useDatasetStore` (the planner's
- * reconciliation decisions, never the dataset itself); `set_available_hours`
- * / `set_lead_time` write to `useSituationScenarioStore` — SCENARIO state,
- * never the baseline (V2 §54). Nothing here mutates `useDataset()`'s
- * dataset.
- *
- * It keeps its own short local transcript, shown in the panel below.
+ * route; `set_lever` writes the Planning Simulator's draft for one transition
+ * (scenario state — the baseline and the dataset are never touched) and opens
+ * the simulator on it.
  */
 export function AiCommandBar({
   className,
-  placeholder = 'Ask Heizen — try "how big is the Halloween gap"',
+  placeholder = 'Ask Heizen — try "which stores run out before the shipment?"',
 }: {
   className?: string;
   placeholder?: string;
 }) {
-  const { situations } = useDataset();
-  const activeSituationId = useDatasetStore((s) => s.activeSituationId);
+  const { dataset, transitions } = useDataset();
+  const overridesByTransition = useDatasetStore((s) => s.overridesByTransition);
   const pathname = usePathname();
   const router = useRouter();
 
@@ -68,40 +56,15 @@ export function AiCommandBar({
     };
   }, []);
 
-  function resolveScenarioId(situationId: string): string {
-    const state = useSituationScenarioStore.getState();
-    const active = state.activeScenarioId ? state.scenarios[state.activeScenarioId] : undefined;
-    if (active && active.situationId === situationId) return active.id;
-    return state.createScenario(situationId, "AI scenario", new Date().toISOString());
-  }
-
   function applyAction(action: CopilotAction) {
     switch (action.kind) {
       case "navigate":
         router.push(action.href);
         return;
-      case "set_disposition": {
-        const dispositions: Record<string, ContributorDisposition> = {};
-        for (const id of action.candidateIds) dispositions[id] = action.disposition;
-        useDatasetStore.getState().setDispositions(action.situationId, dispositions);
+      case "set_lever":
+        useScenarioStore.getState().setLever(action.transitionId, action.key, action.value);
+        router.push(`/simulator?transition=${encodeURIComponent(action.transitionId)}`);
         return;
-      }
-      case "set_available_hours": {
-        // Line hours are plant capacity, not one programme's: they go to the
-        // capacity scenario that Scenario Lab's Capacity planning tab reads.
-        const capacity = useCapacityScenarioStore.getState();
-        const scenarioId =
-          capacity.activeScenarioId && capacity.scenarios[capacity.activeScenarioId]
-            ? capacity.activeScenarioId
-            : capacity.createScenario("AI capacity scenario", new Date().toISOString());
-        useCapacityScenarioStore.getState().setAvailableHours(scenarioId, action.lineId, action.period, action.hours);
-        return;
-      }
-      case "set_lead_time": {
-        const scenarioId = resolveScenarioId(action.situationId);
-        useSituationScenarioStore.getState().setLeadTime(scenarioId, action.materialId, action.days);
-        return;
-      }
       case "none":
         return;
     }
@@ -111,14 +74,25 @@ export function AiCommandBar({
     const trimmed = text.trim();
     if (!trimmed) return;
 
-    const ctx: CopilotContext = { situations, activeSituationId, pathname };
+    // Read at submit time rather than via useSearchParams, which would force
+    // a Suspense boundary around the whole top bar.
+    const query = typeof window === "undefined" ? "" : window.location.search.replace(/^\?/, "");
+    const ctx: CopilotContext = {
+      transitions,
+      dataset,
+      overridesByTransition,
+      pathname: query ? `${pathname}?${query}` : pathname,
+      storeCount: dataset?.stores.length ?? 0,
+    };
     const reply = respond(trimmed, ctx);
     applyAction(reply.action);
 
     counter.current += 1;
-    setExchanges((prev) => [...prev.slice(-9), { id: `ex_${Date.now()}_${counter.current}`, question: trimmed, reply }]);
+    setExchanges((prev) => [...prev.slice(-9), { id: `ex_${counter.current}`, question: trimmed, reply }]);
     setOpen(true);
   }
+
+  const showSuggestions = open && exchanges.length === 0;
 
   return (
     <div ref={containerRef} className={cn("relative", className)}>
@@ -135,9 +109,7 @@ export function AiCommandBar({
         <input
           value={value}
           onChange={(e) => setValue(e.target.value)}
-          onFocus={() => {
-            if (exchanges.length > 0) setOpen(true);
-          }}
+          onFocus={() => setOpen(true)}
           placeholder={placeholder}
           aria-label="Ask Heizen"
           className="min-w-0 flex-1 bg-transparent text-[13px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)]"
@@ -147,6 +119,28 @@ export function AiCommandBar({
           <CornerDownLeft className="size-3.5" />
         </Button>
       </form>
+
+      {showSuggestions ? (
+        <div className="absolute left-0 right-0 top-full z-40 mt-1 overflow-hidden rounded-[var(--radius-md)] border border-[var(--border-strong)] bg-[var(--surface-elevated)] shadow-lg">
+          <div className="border-b border-[var(--border)] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)]">
+            Try asking
+          </div>
+          <ul className="py-1">
+            {SUGGESTED_QUESTIONS.map((q) => (
+              <li key={q}>
+                <button
+                  type="button"
+                  onClick={() => submit(q)}
+                  className="w-full px-3 py-1.5 text-left text-[12.5px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--interaction-hover)] hover:text-[var(--text-primary)]"
+                  style={{ transitionDuration: "var(--duration-fast)" }}
+                >
+                  {q}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {open && exchanges.length > 0 && (
         <div className="absolute left-0 right-0 top-full z-40 mt-1 max-h-[min(60vh,480px)] overflow-y-auto rounded-[var(--radius-md)] border border-[var(--border-strong)] bg-[var(--surface-elevated)] shadow-lg">

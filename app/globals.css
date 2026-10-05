@@ -2,49 +2,52 @@
 @import "tw-animate-css";
 
 /* ==========================================================================
-   Heizen Planning Gap Intelligence — semantic design tokens
+   Heizen SKU Transition Intelligence — semantic design tokens
    Enterprise planning aesthetic: neutral surfaces, subtle borders, strong
    typography, restrained accent use. See the Visual rules in CLAUDE.md.
 
-   Two color dimensions are kept structurally separate and must never be
+   Three color dimensions are kept structurally separate and must never be
    reused for each other:
    - RISK tokens (positive/warning/critical) are reserved for status/severity
      (badges, exception flags, risk bands). They never label a data series.
+   - LINEAGE tokens (legacy/successor/inbound) are the categorical palette for
+     which side of a transition a quantity belongs to — the legacy SKU, its
+     successor, or successor stock still on the water. Every bar, table cell
+     and chart that splits old from new uses these and nothing else.
    - PLANNING STATE tokens (formal/validated/inferred/scenario/historical/
-     unknown) are the categorical palette for data provenance in charts and
-     tables — which layer of a stacked view is official vs. AI-inferred vs.
-     planner scenario vs. historical actual.
+     unknown) mark provenance — what JDA holds vs. what a planner set vs. a
+     simulator what-if.
    ========================================================================== */
 
 @custom-variant dark (&:is(.dark *));
 
 :root {
   /* ---- UI surfaces ---- */
-  --background: oklch(0.985 0.002 247);
+  --background: oklch(0.972 0.012 85);
   --surface: oklch(1 0 0);
   --surface-elevated: oklch(1 0 0);
-  --surface-sunken: oklch(0.97 0.003 247);
-  --border: oklch(0.9 0.004 247);
-  --border-strong: oklch(0.82 0.006 247);
-  --ring: oklch(0.55 0.14 255);
+  --surface-sunken: oklch(0.95 0.016 85);
+  --border: oklch(0.89 0.016 80);
+  --border-strong: oklch(0.8 0.022 78);
+  --ring: oklch(0.42 0.1 258);
 
   /* ---- Text ---- */
-  --text-primary: oklch(0.17 0.01 255);
-  --text-secondary: oklch(0.42 0.015 255);
-  --text-muted: oklch(0.58 0.012 255);
+  --text-primary: oklch(0.22 0.025 255);
+  --text-secondary: oklch(0.42 0.025 250);
+  --text-muted: oklch(0.56 0.02 70);
   --text-on-accent: oklch(0.99 0 0);
 
   /* ---- Accent (restrained; UI chrome only, not data series) ---- */
-  --accent: oklch(0.5 0.15 255);
-  --accent-soft: oklch(0.94 0.03 255);
+  --accent: oklch(0.39 0.1 258);
+  --accent-soft: oklch(0.93 0.03 258);
 
   /* ---- Risk / severity (reserved — status only, never a data series) ---- */
-  --risk-positive: oklch(0.6 0.13 155);
-  --risk-positive-soft: oklch(0.94 0.045 155);
-  --risk-warning: oklch(0.72 0.15 75);
-  --risk-warning-soft: oklch(0.94 0.06 75);
-  --risk-critical: oklch(0.58 0.19 25);
-  --risk-critical-soft: oklch(0.94 0.05 25);
+  --risk-positive: oklch(0.52 0.11 135);
+  --risk-positive-soft: oklch(0.94 0.045 130);
+  --risk-warning: oklch(0.66 0.14 72);
+  --risk-warning-soft: oklch(0.95 0.06 85);
+  --risk-critical: oklch(0.54 0.19 27);
+  --risk-critical-soft: oklch(0.94 0.045 25);
 
   /* ---- Planning state (categorical — data provenance in charts/tables) ---- */
   --state-formal: oklch(0.32 0.02 255);
@@ -59,6 +62,14 @@
   --state-historical-soft: oklch(0.94 0.003 255);
   --state-unknown: oklch(0.75 0.004 255);
   --state-unknown-soft: oklch(0.95 0.002 255);
+
+  /* ---- Lineage (categorical — legacy vs successor vs inbound) ---- */
+  --lineage-legacy: oklch(0.62 0.08 72);
+  --lineage-legacy-soft: oklch(0.93 0.035 80);
+  --lineage-successor: oklch(0.39 0.1 258);
+  --lineage-successor-soft: oklch(0.93 0.035 258);
+  --lineage-inbound: oklch(0.66 0.09 200);
+  --lineage-inbound-soft: oklch(0.94 0.03 200);
 
   /* ---- Semantic aliases (exact vocabulary from the Visual rules in CLAUDE.md) ---- */
   --surface-raised: var(--surface-elevated);
@@ -90,7 +101,7 @@
      the bar sitting in it. A track has to read as *unfilled space*, which
      means slightly darker than the surface in light and slightly lighter in
      dark — the opposite direction in each theme. */
-  --chart-track: oklch(0.945 0.004 247);
+  --chart-track: oklch(0.93 0.018 82);
 
   /* ---- Motion ----
      Motion here exists to show *change*: a number that moved because an
@@ -112,11 +123,11 @@
 }
 
 .dark {
-  --background: oklch(0.16 0.008 255);
-  --surface: oklch(0.2 0.008 255);
-  --surface-elevated: oklch(0.23 0.009 255);
-  --surface-sunken: oklch(0.13 0.007 255);
-  --border: oklch(0.3 0.008 255);
+  --background: oklch(0.18 0.012 70);
+  --surface: oklch(0.215 0.012 70);
+  --surface-elevated: oklch(0.245 0.013 70);
+  --surface-sunken: oklch(0.155 0.01 70);
+  --border: oklch(0.32 0.014 70);
   --border-strong: oklch(0.38 0.01 255);
   --ring: oklch(0.65 0.14 255);
 
@@ -125,14 +136,14 @@
   --text-muted: oklch(0.58 0.01 255);
   --text-on-accent: oklch(0.99 0 0);
 
-  --accent: oklch(0.68 0.14 255);
+  --accent: oklch(0.72 0.11 258);
   --accent-soft: oklch(0.28 0.05 255);
 
-  --risk-positive: oklch(0.72 0.15 155);
+  --risk-positive: oklch(0.74 0.13 135);
   --risk-positive-soft: oklch(0.31 0.038 155);
   --risk-warning: oklch(0.78 0.15 75);
   --risk-warning-soft: oklch(0.33 0.042 75);
-  --risk-critical: oklch(0.68 0.18 25);
+  --risk-critical: oklch(0.7 0.17 27);
   --risk-critical-soft: oklch(0.33 0.05 25);
 
   --state-formal: oklch(0.66 0.012 255);
@@ -147,6 +158,13 @@
   --state-historical-soft: oklch(0.26 0.006 255);
   --state-unknown: oklch(0.45 0.004 255);
   --state-unknown-soft: oklch(0.24 0.004 255);
+
+  --lineage-legacy: oklch(0.74 0.08 75);
+  --lineage-legacy-soft: oklch(0.31 0.035 75);
+  --lineage-successor: oklch(0.7 0.12 258);
+  --lineage-successor-soft: oklch(0.3 0.05 258);
+  --lineage-inbound: oklch(0.74 0.09 200);
+  --lineage-inbound-soft: oklch(0.3 0.04 200);
 
   /* Lighter than the surface it sits on, not darker — see the note above. */
   --chart-track: oklch(0.29 0.008 255);
@@ -191,6 +209,13 @@
   --color-state-historical-soft: var(--state-historical-soft);
   --color-state-unknown: var(--state-unknown);
   --color-state-unknown-soft: var(--state-unknown-soft);
+
+  --color-lineage-legacy: var(--lineage-legacy);
+  --color-lineage-legacy-soft: var(--lineage-legacy-soft);
+  --color-lineage-successor: var(--lineage-successor);
+  --color-lineage-successor-soft: var(--lineage-successor-soft);
+  --color-lineage-inbound: var(--lineage-inbound);
+  --color-lineage-inbound-soft: var(--lineage-inbound-soft);
 
   --color-surface-raised: var(--surface-raised);
   --color-border-subtle: var(--border-subtle);

@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Heizen | Planning Gap Intelligence",
-  description: "Planning intelligence for the gap between real-world business knowledge and the formal planning representation.",
+  title: "Heizen | SKU Transition Intelligence",
+  description: "Plan across product transitions, not just individual SKUs — continuity demand, network inventory and replenishment across legacy and successor SKUs.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
